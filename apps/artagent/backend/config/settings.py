@@ -320,6 +320,11 @@ RECOGNIZED_LANGUAGE: list[str] = _env_list(
     "RECOGNIZED_LANGUAGE", "en-US,es-ES,fr-FR,ko-KR,it-IT,pt-PT,pt-BR"
 )
 
+# Audio bridge (PCMU <-> PCM16)
+BRIDGE_MODE: str = os.getenv("BRIDGE_MODE", "off").strip().lower()
+AUDIO_BRIDGE_BUFFER_LIMIT_MS: int = _env_int("AUDIO_BRIDGE_BUFFER_LIMIT_MS", 500)
+AUDIO_BRIDGE_FAIL_CLOSED: bool = _env_bool("AUDIO_BRIDGE_FAIL_CLOSED", True)
+
 
 # ==============================================================================
 # CONNECTION & SESSION MANAGEMENT

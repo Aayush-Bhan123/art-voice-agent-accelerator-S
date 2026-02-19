@@ -19,7 +19,7 @@ WORKDIR /app
 # Install build dependencies (gcc needed for some Azure SDK native extensions)
 # Note: portaudio19-dev NOT installed - pyaudio/sounddevice are optional [audio] extras for local dev only
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc build-essential && \
+    apt-get install -y --no-install-recommends gcc build-essential ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Set up virtual environment

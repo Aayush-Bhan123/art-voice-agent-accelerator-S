@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from src.pools.session_manager import SessionContext
     from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
     from src.stateful.state_managment import MemoManager
+    from src.audio_bridge.base import AudioBridge
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +180,8 @@ class VoiceSessionContext:
     orchestrator: CascadeOrchestratorAdapter | None = None
     tts_playback: TTSPlayback | None = None
     speech_cascade: SpeechCascadeHandler | None = None
+    audio_bridge: AudioBridge | None = None
+    bridge_mode: str = "off"
 
     # ─── Agent State ───
     # Cached current agent object (set by MediaHandler or orchestrator)

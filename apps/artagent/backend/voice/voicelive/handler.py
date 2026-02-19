@@ -72,6 +72,19 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from utils.ml_logging import get_logger
 from utils.telemetry_decorators import ConversationTurnSpan
 
+from src.audio_bridge import FfmpegAudioBridge
+
+try:
+    from apps.artagent.backend.config.settings import (
+        AUDIO_BRIDGE_BUFFER_LIMIT_MS as _BRIDGE_BUFFER_LIMIT_MS,
+        AUDIO_BRIDGE_FAIL_CLOSED as _BRIDGE_FAIL_CLOSED,
+        BRIDGE_MODE as _BRIDGE_MODE,
+    )
+except ImportError:
+    _BRIDGE_MODE = "off"
+    _BRIDGE_BUFFER_LIMIT_MS = 500
+    _BRIDGE_FAIL_CLOSED = True
+
 from .dtmf_processor import DTMFProcessor
 from .metrics import (
     record_llm_ttft,
@@ -779,6 +792,9 @@ class VoiceLiveSDKHandler:
         self._last_user_transcript: str | None = None
         self._last_user_turn_id: str | None = None
 
+        # Audio bridge for PCMU<->PCM16 conversion (Genesys integration)
+        self._audio_bridge: FfmpegAudioBridge | None = None
+
         # Turn-level latency tracking
         self._turn_number: int = 0
         self._active_turn_span: ConversationTurnSpan | None = None
@@ -903,6 +919,26 @@ class VoiceLiveSDKHandler:
                     "heartbeat": self._settings.ws_heartbeat,
                     "timeout": self._settings.ws_timeout,
                 }
+
+                # Initialize audio bridge for PCMU<->PCM16 conversion if enabled
+                if _BRIDGE_MODE == "pcmu_pcm16":
+                    try:
+                        self._audio_bridge = FfmpegAudioBridge(
+                            buffer_limit_ms=_BRIDGE_BUFFER_LIMIT_MS,
+                            pcm16_sample_rate=24000,
+                        )
+                        logger.info(
+                            "Audio bridge initialized for VoiceLive | session=%s rate=24000",
+                            self.session_id,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to initialize audio bridge for VoiceLive: %s | session=%s",
+                            exc,
+                            self.session_id,
+                        )
+                        if _BRIDGE_FAIL_CLOSED:
+                            raise
 
                 # Trace VoiceLive connection establishment
                 conn_attrs = create_service_dependency_attrs(
@@ -1183,6 +1219,15 @@ class VoiceLiveSDKHandler:
             self._running = False
             self._shutdown.set()
 
+            # Close audio bridge if active
+            bridge = self._audio_bridge
+            self._audio_bridge = None
+            if bridge is not None:
+                try:
+                    bridge.close()
+                except Exception:
+                    logger.debug("Failed to close audio bridge", exc_info=True)
+
             # Unregister from scenario update callbacks
             unregister_voicelive_orchestrator(self.session_id)
 
@@ -1308,6 +1353,22 @@ class VoiceLiveSDKHandler:
             encoded = audio_section.get("data")
             if not encoded:
                 return
+            if self._audio_bridge is not None:
+                try:
+                    pcmu_bytes = base64.b64decode(encoded)
+                    pcm16_bytes = await asyncio.to_thread(
+                        self._audio_bridge.transcode_pcmu_to_pcm16, pcmu_bytes
+                    )
+                    if not pcm16_bytes:
+                        return
+                    encoded = base64.b64encode(pcm16_bytes).decode("utf-8")
+                except Exception:
+                    logger.warning(
+                        "Audio bridge ingress conversion failed | session=%s",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                    return
             await self._connection.input_audio_buffer.append(audio=encoded)
             return
 
@@ -1637,8 +1698,22 @@ class VoiceLiveSDKHandler:
         if not pcm_bytes:
             return
 
-        # Resample VoiceLive 24 kHz PCM to match ACS expectations.
-        resampled = self._resample_audio(pcm_bytes)
+        # When bridge is active, convert PCM16 24kHz → PCMU 8kHz for Genesys.
+        # Otherwise, resample 24kHz → ACS target rate (default 16kHz).
+        if self._audio_bridge is not None:
+            try:
+                pcmu_bytes = await asyncio.to_thread(
+                    self._audio_bridge.transcode_pcm16_to_pcmu, pcm_bytes
+                )
+                resampled = base64.b64encode(pcmu_bytes).decode("utf-8") if pcmu_bytes else None
+            except Exception:
+                logger.debug("Audio bridge egress conversion failed", exc_info=True)
+                resampled = None
+            if not resampled:
+                return
+        else:
+            # Resample VoiceLive 24 kHz PCM to match ACS expectations.
+            resampled = self._resample_audio(pcm_bytes)
         frame_index = self._allocate_frame_index(response_id)
         try:
             logger.debug(
