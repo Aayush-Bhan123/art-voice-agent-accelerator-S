@@ -139,6 +139,44 @@ If missing, add `ffmpeg` to your package installation step. On Debian/Ubuntu-bas
 
 The bridge verifies FFmpeg availability at startup and will fail fast with a clear error message if it's not found — you won't get a cryptic runtime failure.
 
+### 3b. FFmpeg for Local Development (Without Containers)
+
+If you're running ART directly on your machine (not in a container or devcontainer), install FFmpeg for your OS:
+
+**Windows (winget):**
+```powershell
+winget install Gyan.FFmpeg
+# Restart your terminal, then verify:
+ffmpeg -version
+```
+
+**Windows (Chocolatey):**
+```powershell
+choco install ffmpeg
+```
+
+**Windows (manual):**
+Download from https://www.gyan.dev/ffmpeg/builds/ — get the "release essentials" build, extract it, and add the `bin/` folder to your `PATH`.
+
+**macOS (Homebrew):**
+```bash
+brew install ffmpeg
+```
+
+**Ubuntu / Debian / WSL:**
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg
+```
+
+**Verify installation:**
+```bash
+ffmpeg -version
+# Also confirm Python can find it:
+python -c "import shutil; print(shutil.which('ffmpeg'))"
+```
+
+> **Note:** If you're using the VS Code **devcontainer**, FFmpeg is already included — the `.devcontainer/Dockerfile` installs it automatically.
+
 ### 4. No Changes to Your Genesys AudioHook
 
 Your existing Genesys AudioHook WebSocket integration stays exactly the same. The bridge operates inside ART's audio processing pipeline, downstream of the WebSocket message parsing. Genesys continues to send PCMU frames in its standard format; ART now knows how to consume them.
