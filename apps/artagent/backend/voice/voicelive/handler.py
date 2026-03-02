@@ -1369,6 +1369,14 @@ class VoiceLiveSDKHandler:
                         exc_info=True,
                     )
                     return
+            if not hasattr(self, '_input_audio_log_count'):
+                self._input_audio_log_count = 0
+            self._input_audio_log_count += 1
+            if self._input_audio_log_count <= 3 or self._input_audio_log_count % 200 == 0:
+                logger.info(
+                    "[VoiceLive] Appending audio to input buffer: %d PCM16 bytes (chunk #%d) | session=%s",
+                    len(base64.b64decode(encoded)), self._input_audio_log_count, self.session_id,
+                )
             await self._connection.input_audio_buffer.append(audio=encoded)
             return
 
@@ -1428,8 +1436,15 @@ class VoiceLiveSDKHandler:
                         else str(etype) if etype else "unknown"
                     )
 
-                    # Add span event for each VoiceLive event (batched, not per-event spans)
-                    # Filter out high-frequency noisy events
+                    if event_count <= 5 or event_type_str not in (
+                        "response.audio_transcript.delta",
+                        "response.audio.delta",
+                    ):
+                        logger.info(
+                            "[VoiceLive] Event #%d: %s | session=%s",
+                            event_count, event_type_str, self.session_id,
+                        )
+
                     if event_type_str not in (
                         "response.audio_transcript.delta",
                         "response.audio.delta",
@@ -1707,9 +1722,17 @@ class VoiceLiveSDKHandler:
                 )
                 resampled = base64.b64encode(pcmu_bytes).decode("utf-8") if pcmu_bytes else None
             except Exception:
-                logger.debug("Audio bridge egress conversion failed", exc_info=True)
+                logger.info("Audio bridge egress conversion failed | session=%s", self.session_id, exc_info=True)
                 resampled = None
             if not resampled:
+                if not hasattr(self, '_egress_empty_count'):
+                    self._egress_empty_count = 0
+                self._egress_empty_count += 1
+                if self._egress_empty_count <= 3:
+                    logger.info(
+                        "[VoiceLive] Bridge returned empty PCMU (input=%d PCM16 bytes, empty #%d) | session=%s",
+                        len(pcm_bytes), self._egress_empty_count, self.session_id,
+                    )
                 return
         else:
             # Resample VoiceLive 24 kHz PCM to match ACS expectations.
