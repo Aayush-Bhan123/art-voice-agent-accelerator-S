@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,11 +32,24 @@ class VoiceLiveSettings(BaseSettings):
         extra="ignore",
     )
 
-    # Azure VoiceLive Configuration
-    azure_voicelive_endpoint: str = Field(..., description="Azure VoiceLive endpoint URL")
+    # Azure VoiceLive Configuration (or use OPENAI_* fallbacks below)
+    azure_voicelive_endpoint: str = Field(
+        default="",
+        description="Azure VoiceLive/OpenAI Realtime endpoint URL (base HTTPS or full wss)",
+    )
     azure_voicelive_model: str = Field(default="gpt-realtime", description="Model deployment name")
     azure_voicelive_api_key: str | None = Field(
         default=None, description="API key for authentication"
+    )
+
+    # OpenAI Realtime fallbacks (map into Azure VoiceLive when AZURE_VOICELIVE_* not set)
+    openai_model_endpoint: str | None = Field(
+        default=None,
+        description="Full OpenAI Realtime WebSocket URL (e.g. wss://.../openai/realtime?api-version=...&deployment=...)",
+    )
+    openai_api_key: str | None = Field(
+        default=None,
+        description="OpenAI/Azure OpenAI API key (fallback for azure_voicelive_api_key)",
     )
     use_default_credential: bool = Field(
         default=False,
@@ -75,6 +89,21 @@ class VoiceLiveSettings(BaseSettings):
     # Audio Configuration
     enable_audio: bool = Field(default=True, description="Enable audio capture/playback")
 
+    def apply_openai_fallbacks(self) -> None:
+        """Map OPENAI_MODEL_ENDPOINT / OPENAI_API_KEY into Azure VoiceLive fields."""
+        if not (self.azure_voicelive_endpoint or "").strip() and (self.openai_model_endpoint or "").strip():
+            url = self.openai_model_endpoint.strip()
+            if url.startswith(("wss://", "ws://")):
+                parsed = urlparse(url)
+                self.azure_voicelive_endpoint = f"https://{parsed.netloc}/"
+                qs = parse_qs(parsed.query)
+                if "deployment" in qs and qs["deployment"]:
+                    self.azure_voicelive_model = qs["deployment"][0]
+            else:
+                self.azure_voicelive_endpoint = url
+        if not self.azure_voicelive_api_key and self.openai_api_key:
+            self.azure_voicelive_api_key = self.openai_api_key
+
     @property
     def agents_path(self) -> Path:
         """Get absolute path to agents directory (registries/agentstore)."""
@@ -108,6 +137,7 @@ class VoiceLiveSettings(BaseSettings):
 def get_settings() -> VoiceLiveSettings:
     """Get or create settings instance (singleton pattern)."""
     settings = VoiceLiveSettings()
+    settings.apply_openai_fallbacks()
     settings.validate_auth()
     return settings
 

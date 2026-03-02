@@ -11,7 +11,7 @@ tag definitions and descriptions.
 
 from fastapi import APIRouter
 
-from .endpoints import agent_builder, browser, calls, health, mcp, media, metrics, scenario_builder, scenarios, sessions
+from .endpoints import agent_builder, browser, calls, genesys, health, mcp, media, metrics, scenario_builder, scenarios, sessions
 
 # Create v1 router
 v1_router = APIRouter(prefix="/api/v1")
@@ -20,6 +20,7 @@ v1_router = APIRouter(prefix="/api/v1")
 v1_router.include_router(health.router)
 v1_router.include_router(calls.router, prefix="/calls")
 v1_router.include_router(media.router, prefix="/media")
+v1_router.include_router(genesys.router, prefix="/genesys")
 v1_router.include_router(browser.router, prefix="/browser")
 v1_router.include_router(metrics.router, prefix="/metrics")
 v1_router.include_router(agent_builder.router, prefix="/agent-builder")
