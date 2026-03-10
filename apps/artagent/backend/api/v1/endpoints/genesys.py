@@ -226,15 +226,16 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
 
                     if msg_type == GENESYS_OPEN:
                         server_seq += 1
-                        # Media: PCMU 8kHz mono (match Genesys AudioHook)
+                        # Media: PCMU 8kHz mono (match Genesys AudioHook v2 protocol)
+                        # Note: uses "format" (not "codec") and "external" (not "capture"/"playback") per AudioHook v2 spec
                         opened_params = {
                             "startPaused": False,
                             "media": [
                                 {
                                     "type": "audio",
-                                    "codec": "PCMU",
+                                    "format": "PCMU",
                                     "rate": 8000,
-                                    "channels": ["capture", "playback"],
+                                    "channels": ["external"],
                                 }
                             ],
                         }
@@ -246,10 +247,12 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                         logger.info("[%s] Genesys OPEN → OPENED", session_id)
                         break
                     if msg_type == GENESYS_PING:
-                        server_seq += 1
-                        await websocket.send_json(
-                            _genesys_server_message(GENESYS_PONG, session_id, server_seq, client_seq)
-                        )
+                        # Do NOT respond to PING before OPENED is sent.
+                        # AudioHook v2 protocol requires that the first server message is OPENED (seq=1).
+                        # If we respond to PING with PONG here (consuming seq=1), the subsequent OPENED
+                        # will have seq=2, causing the client to reject it with "expected seq=1".
+                        # Genesys will retry PING after OPENED is sent and the session is ready.
+                        logger.debug("[%s] Suppressing PING response in pre-OPEN phase", session_id)
                         continue
                     if msg_type == GENESYS_CLOSE:
                         server_seq += 1

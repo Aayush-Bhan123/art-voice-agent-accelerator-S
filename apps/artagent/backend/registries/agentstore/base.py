@@ -1114,6 +1114,11 @@ class UnifiedAgent:
         if not say:
             return
 
+        # Validate connection is still active before attempting to send
+        if not conn or not hasattr(conn, 'send'):
+            logger.warning("[%s] VoiceLive connection not available - skipping response trigger", self.name)
+            return
+
         # Cancel any active response first to avoid conflicts
         if cancel_active:
             try:
@@ -1138,7 +1143,7 @@ class UnifiedAgent:
             )
             logger.debug("[%s] Triggered verbatim greeting response", self.name)
         except Exception as e:
-            logger.warning("trigger_voicelive_response failed: %s", e)
+            logger.debug("trigger_voicelive_response warning (connection may be closing): %s", e)
 
     def __repr__(self) -> str:
         return (

@@ -38,11 +38,18 @@ def register_core_state_step(manager: LifecycleManager, app: FastAPI) -> None:
     app_config = AppConfig()
 
     async def start() -> None:
-        # Initialize Redis
-        try:
-            app.state.redis = AzureRedisManager()
-        except Exception as exc:
-            raise RuntimeError(f"Redis initialization failed: {exc}") from exc
+        # Initialize Redis (optional when SKIP_REDIS=1 or REDIS_HOST unset for local dev)
+        skip_redis = os.environ.get("SKIP_REDIS", "").strip().lower() in ("1", "true", "yes")
+        if skip_redis or not os.environ.get("REDIS_HOST", "").strip():
+            app.state.redis = None
+            logger.warning(
+                "Redis disabled (SKIP_REDIS or no REDIS_HOST). Session persistence and distributed bus disabled."
+            )
+        else:
+            try:
+                app.state.redis = AzureRedisManager()
+            except Exception as exc:
+                raise RuntimeError(f"Redis initialization failed: {exc}") from exc
 
         # Wire up session scenario persistence
         from apps.artagent.backend.src.orchestration.session_scenarios import set_redis_manager
@@ -323,12 +330,20 @@ def register_external_services_step(manager: LifecycleManager, app: FastAPI) -> 
     )
 
     async def start() -> None:
-        # Initialize Cosmos DB
-        app.state.cosmos = CosmosDBMongoCoreManager(
-            connection_string=AZURE_COSMOS_CONNECTION_STRING,
-            database_name=AZURE_COSMOS_DATABASE_NAME,
-            collection_name=AZURE_COSMOS_COLLECTION_NAME,
+        # Initialize Cosmos DB (skip when placeholder or SKIP_REDIS for local dev)
+        skip_cosmos = (
+            os.environ.get("SKIP_REDIS", "").strip().lower() in ("1", "true", "yes")
+            or "placeholder" in (AZURE_COSMOS_CONNECTION_STRING or "").lower()
         )
+        if skip_cosmos:
+            app.state.cosmos = None
+            logger.warning("Cosmos DB disabled (SKIP_REDIS or placeholder connection string).")
+        else:
+            app.state.cosmos = CosmosDBMongoCoreManager(
+                connection_string=AZURE_COSMOS_CONNECTION_STRING,
+                database_name=AZURE_COSMOS_DATABASE_NAME,
+                collection_name=AZURE_COSMOS_COLLECTION_NAME,
+            )
 
         # Initialize ACS caller
         app.state.acs_caller = initialize_acs_caller_instance()
@@ -485,7 +500,12 @@ def register_mcp_servers_step(manager: LifecycleManager, app: FastAPI) -> None:
 
         servers = get_enabled_mcp_servers()
         if not servers:
-            logger.info("No MCP servers with valid URLs configured")
+            # This is normal - MCP_ENABLED_SERVERS may list servers, but if their URLs aren't
+            # configured in the environment, they won't be included. This is not an error.
+            unconfigured = [s for s in MCP_ENABLED_SERVERS if s not in [srv.get('name') for srv in servers]]
+            if unconfigured:
+                logger.info(f"MCP servers listed but not configured (no URL set): {unconfigured}")
+            logger.info("No MCP servers with valid URLs to validate")
             app.state.mcp_servers_status = {}
             app.state.mcp_ready = True
             return
