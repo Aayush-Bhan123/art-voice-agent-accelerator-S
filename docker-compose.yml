@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  frontend:
+    platform: linux/amd64
+    build:
+      context: ./apps/artagent/frontend
+      dockerfile: Dockerfile
+    env_file:
+      - ./apps/artagent/frontend/.env.docker
+    environment:
+      # Connect to Azure-deployed backend
+      - BACKEND_URL=https://artaudioagent-backend-x1roluwb.victoriousdune-7a5dae29.eastus.azurecontainerapps.io
+      - WS_URL=wss://artaudioagent-backend-x1roluwb.victoriousdune-7a5dae29.eastus.azurecontainerapps.io
+      - PORT=8080
+    ports:
+      - "3001:8080"
+    restart: unless-stopped
+
+networks:
+  art-voice-network:
+    driver: bridge

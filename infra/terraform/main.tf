@@ -102,6 +102,18 @@ locals {
   # Voice Live model names to exclude from base deployments when using separate Voice Live account
   voice_live_model_names = [for d in var.voice_live_model_deployments : d.name]
 
+  # Sanitized name/env for Azure naming rules (lowercase alphanumeric and hyphen only)
+  _name_sanitized = lower(replace(replace(replace(replace(var.name, "_", "-"), " ", "-"), ".", "-"), "/", "-"))
+  _env_sanitized  = lower(replace(replace(replace(replace(var.environment_name, "_", "-"), " ", "-"), ".", "-"), "/", "-"))
+
+  # Container App Environment: max 60 chars, must start with letter, end with alphanumeric
+  _container_env_raw = "cae-${local._name_sanitized}-${local._env_sanitized}-${local.resource_token}"
+  _container_env_trimmed = trim(substr(local._container_env_raw, 0, 60), "-")
+
+  # App Configuration: alphanumeric and dashes only, 5-50 chars
+  _appconfig_raw   = "appconfig-${local._env_sanitized}-${local.resource_token}"
+  _appconfig_trimmed = trim(substr(local._appconfig_raw, 0, 50), "-")
+
   # Resource naming with Azure standard abbreviations
   # Following Azure Cloud Adoption Framework: https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/ready/azure-best-practices/resource-abbreviations
   resource_names = {
@@ -117,7 +129,7 @@ locals {
     container_registry         = "cr${var.name}${local.resource_token}"
     log_analytics              = "log-${local.resource_token}"
     app_insights               = "ai-${local.resource_token}"
-    container_env              = "cae-${var.name}-${var.environment_name}-${local.resource_token}"
+    container_env              = local._container_env_trimmed
     email_service              = "email-${var.name}-${var.environment_name}-${local.resource_token}"
     email_domain               = "AzureManagedDomain"
     foundry_account            = substr(replace("${var.name}-${local.resource_token}-aif", "/[^a-zA-Z0-9]/", ""), 0, 24)

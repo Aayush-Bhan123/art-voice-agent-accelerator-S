@@ -1,0 +1,29 @@
+{
+  "name": "art-voice-agent-accelerator",
+  "version": "1.0.0",
+  "description": "<!-- markdownlint-disable MD033 MD041 -->",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://IBM-CA-MSPRACTICE@dev.azure.com/IBM-CA-MSPRACTICE/POCs/_git/art-voice-agent-accelerator"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2"
+  }
+}
