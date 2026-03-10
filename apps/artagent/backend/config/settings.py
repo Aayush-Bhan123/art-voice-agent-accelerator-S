@@ -177,8 +177,8 @@ ACS_CONNECTION_STRING: str = os.getenv("ACS_CONNECTION_STRING", "")
 ACS_SOURCE_PHONE_NUMBER: str = os.getenv("ACS_SOURCE_PHONE_NUMBER", "")
 BASE_URL: str = os.getenv("BASE_URL", "")
 
-# ACS Streaming
-ACS_STREAMING_MODE: StreamMode = StreamMode(os.getenv("ACS_STREAMING_MODE", "media").lower())
+# ACS Streaming (default: voice_live = OpenAI Realtime STT/TTS; use "media" for Cascade/Azure Speech STT+TTS)
+ACS_STREAMING_MODE: StreamMode = StreamMode(os.getenv("ACS_STREAMING_MODE", "voice_live").lower())
 
 # ACS Authentication
 ACS_JWKS_URL = "https://acscallautomation.communication.azure.com/calling/keys"

@@ -54,7 +54,8 @@ from apps.artagent.backend.src.orchestration.naming import agent_key, find_agent
 # ─────────────────────────────────────────────────────────────────────
 
 # Unified default start agent name (used by both adapters)
-DEFAULT_START_AGENT = "BankingConcierge"
+# Override via DEFAULT_START_AGENT env var (e.g. "Concierge", "ClaimsSpecialist")
+DEFAULT_START_AGENT = os.environ.get("DEFAULT_START_AGENT", "BankingConcierge")
 
 # Environment variable for scenario selection
 SCENARIO_ENV_VAR = "AGENT_SCENARIO"
