@@ -192,7 +192,7 @@ function doConnect() {
       parameters: {
         conversationId: sessionId,
         participant: { ani: "+15551234567", aniName: "Test User", dnis: "+15559876543" },
-        media: [{ type: "audio", codec: "PCMU", rate: 8000, channels: ["capture", "playback"] }]
+        media: [{ type: "audio", format: "PCMU", rate: 8000, channels: ["external"] }]
       }
     };
     ws.send(JSON.stringify(openMsg));

@@ -10,6 +10,7 @@ import base64
 import json
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -24,7 +25,7 @@ GENESYS_CLOSE = "close"
 GENESYS_CLOSED = "closed"
 
 
-def _genesys_msg(msg_type: str, session_id: str, seq: int, clientseq: int, params: dict | None = None):
+def _genesys_msg(msg_type: str, session_id: str, seq: int, clientseq: int, params: Optional[dict] = None):
     return {"version": "2", "type": msg_type, "seq": seq, "clientseq": clientseq, "id": session_id, "parameters": params or {}}
 
 
@@ -69,7 +70,7 @@ async def genesys_stream(websocket: WebSocket):
                     server_seq += 1
                     await websocket.send_json(_genesys_msg(
                         GENESYS_OPENED, session_id, server_seq, client_seq,
-                        {"startPaused": False, "media": [{"type": "audio", "codec": "PCMU", "rate": 8000, "channels": ["capture", "playback"]}]}
+                        {"startPaused": False, "media": [{"type": "audio", "format": "PCMU", "rate": 8000, "channels": ["external"]}]}
                     ))
                     open_received = True
                     continue
