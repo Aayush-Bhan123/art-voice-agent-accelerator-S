@@ -9,7 +9,7 @@ RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
+ENV BRIDGE_MODE=pcmu_pcm16
 # Create a non-root user and group
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
