@@ -423,6 +423,8 @@ ENTRA_EXEMPT_PATHS: list[str] = [
     "/openapi.json",
     "/metrics",
     "/v1/health",
+    "/api/v1/genesys/",
+    "/api/v1/genesys-debug/",
 ]
 
 

@@ -357,6 +357,12 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                             _genesys_server_message(GENESYS_PONG, session_id, server_seq, client_seq)
                         )
                         continue
+                    if msg_type == GENESYS_UPDATE:
+                        server_seq += 1
+                        await websocket.send_json(
+                            _genesys_server_message(GENESYS_UPDATED, session_id, server_seq, client_seq)
+                        )
+                        continue
                     if msg_type == GENESYS_CLOSE:
                         server_seq += 1
                         await websocket.send_json(
