@@ -74,7 +74,7 @@ async def genesys_debug_stream(websocket: WebSocket) -> None:
     - Correct seq numbering on all server messages
     - Logs every protocol message received and sent
     - Converts PCMU audio → PCM16 and runs Azure Speech STT
-    - No audio sent back (receive-only diagnostic)
+    - Echo mode: ?echo=true sends received audio back (tests outbound path)
     """
     query_params = dict(websocket.query_params)
     session_id = (
@@ -94,12 +94,16 @@ async def genesys_debug_stream(websocket: WebSocket) -> None:
             await websocket.close(code=3000, reason="Invalid API Key")
             return
 
+    # Echo mode: ?echo=true sends received audio back as binary (tests outbound path)
+    echo_mode = query_params.get("echo", "").lower() in ("true", "1", "yes")
+
     await websocket.accept()
-    logger.info("[%s] DEBUG endpoint: WebSocket accepted", session_id)
+    logger.info("[%s] DEBUG endpoint: WebSocket accepted (echo=%s)", session_id, echo_mode)
 
     server_seq = 0  # Server message counter (incremented before each send)
     client_seq = 0  # Last client seq seen
     audio_chunk_count = 0
+    audio_echo_count = 0
     total_audio_bytes = 0
     recognizer = None
     bridge = None
@@ -202,12 +206,18 @@ async def genesys_debug_stream(websocket: WebSocket) -> None:
 
             # ── Phase 2: Initialize STT (optional — best-effort) ────────
             try:
-                from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
                 from apps.artagent.backend.config.settings import (
                     AZURE_SPEECH_REGION,
+                    AZURE_SPEECH_KEY,
                     RECOGNIZED_LANGUAGE,
                     SILENCE_DURATION_MS,
                 )
+
+                if not AZURE_SPEECH_REGION or not AZURE_SPEECH_KEY or "placeholder" in AZURE_SPEECH_KEY.lower():
+                    logger.info("[%s] DEBUG: STT skipped (speech credentials not configured)", session_id)
+                    raise ValueError("Speech credentials not configured")
+
+                from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
 
                 recognizer = StreamingSpeechRecognizerFromBytes(
                     region=AZURE_SPEECH_REGION,
@@ -317,6 +327,19 @@ async def genesys_debug_stream(websocket: WebSocket) -> None:
                             total_audio_bytes / 8000,  # PCMU = 8000 bytes/sec
                         )
 
+                    # Echo audio back if enabled (tests outbound path)
+                    if echo_mode:
+                        try:
+                            await websocket.send_bytes(binary)
+                            audio_echo_count += 1
+                            if audio_echo_count <= 5 or audio_echo_count % 100 == 0:
+                                logger.info(
+                                    "[%s] DEBUG ECHO: sent back %d bytes (echo #%d)",
+                                    session_id, len(binary), audio_echo_count,
+                                )
+                        except Exception as e:
+                            logger.warning("[%s] DEBUG ECHO send failed: %s", session_id, e)
+
                     # Feed to STT if available
                     if recognizer and bridge:
                         try:
@@ -328,9 +351,10 @@ async def genesys_debug_stream(websocket: WebSocket) -> None:
 
             # ── Session summary ─────────────────────────────────────────
             logger.info(
-                "[%s] DEBUG SESSION SUMMARY: %d audio chunks, %d total bytes, %.1f seconds of audio, server_seq=%d, last_client_seq=%d",
+                "[%s] DEBUG SESSION SUMMARY: %d audio chunks received, %d echoed back, %d total bytes, %.1f sec audio, server_seq=%d, last_client_seq=%d",
                 session_id,
                 audio_chunk_count,
+                audio_echo_count,
                 total_audio_bytes,
                 total_audio_bytes / 8000 if total_audio_bytes else 0,
                 server_seq,
