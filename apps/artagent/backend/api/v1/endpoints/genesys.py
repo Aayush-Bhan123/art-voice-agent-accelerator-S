@@ -45,6 +45,10 @@ GENESYS_UPDATED = "updated"
 # Optional API key (if GENESYS_WS_API_KEY is set, X-Api-Key header must match)
 GENESYS_WS_API_KEY = os.environ.get("GENESYS_WS_API_KEY", "").strip()
 
+# Timeout for receiving a message from Genesys before considering the connection dead (seconds).
+# Genesys sends audio at ~50fps (20ms) plus PINGs, so 30s of silence is abnormal.
+_RECEIVE_TIMEOUT_S = float(os.environ.get("GENESYS_RECEIVE_TIMEOUT", "30"))
+
 # Possible locations for tests/genesys_test.html (genesys.py is in .../api/v1/endpoints/)
 _THIS_DIR = Path(__file__).resolve().parent
 _CANDIDATE_ROOTS = [
@@ -92,10 +96,15 @@ class _GenesysWebSocketWrapper:
     - For kind "AudioData": decode base64 and send raw PCMU bytes to Genesys.
     - Other messages (e.g. type "audio_data" for UI): no-op so we don't send JSON to Genesys.
     Proxies state, client_state, application_state, app to the real WebSocket.
+
+    Uses a shared asyncio.Lock to serialize all writes to the underlying WebSocket,
+    preventing interleaved frames from concurrent tasks (audio out + PONG responses).
     """
 
-    def __init__(self, real_ws: WebSocket):
+    def __init__(self, real_ws: WebSocket, write_lock: asyncio.Lock):
         self._real = real_ws
+        self._write_lock = write_lock
+        self._send_count = 0
 
     @property
     def state(self):
@@ -121,8 +130,6 @@ class _GenesysWebSocketWrapper:
             if data_b64:
                 try:
                     pcmu_bytes = base64.b64decode(data_b64)
-                    if not hasattr(self, '_send_count'):
-                        self._send_count = 0
                     self._send_count += 1
                     if self._send_count <= 5 or self._send_count % 50 == 0:
                         logger.info(
@@ -132,7 +139,8 @@ class _GenesysWebSocketWrapper:
                     if self._real.client_state != WebSocketState.CONNECTED:
                         logger.warning("[GenesysWrapper] WebSocket not connected, dropping audio frame #%d", self._send_count)
                         return
-                    await self._real.send_bytes(pcmu_bytes)
+                    async with self._write_lock:
+                        await self._real.send_bytes(pcmu_bytes)
                 except Exception as e:
                     logger.warning("Genesys send_bytes failed: %r (%s)", e, type(e).__name__)
             return
@@ -164,11 +172,17 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
     """
     WebSocket endpoint that speaks the Genesys AudioHook protocol.
 
-    - Expects header Audiohook-Session-Id (or falls back to generated id).
-    - Optional: X-Api-Key must match GENESYS_WS_API_KEY if set.
-    - Client sends OPEN (JSON) → we respond with OPENED, then accept binary PCMU.
-    - Binary frames are forwarded to VoiceLive (via FFmpeg bridge) as ACS-style JSON.
-    - Bot audio is sent back as raw PCMU binary to Genesys.
+    Architecture: After the OPEN handshake, the endpoint splits into concurrent tasks:
+    - **Reader task**: Reads all WebSocket frames and dispatches text messages to a
+      control queue and binary audio to an audio queue.
+    - **Control task**: Processes PING/PONG, UPDATE, CLOSE from the control queue with
+      immediate responses — never blocked by audio processing.
+    - **Audio task**: Processes binary audio chunks from the audio queue, forwarding
+      to VoiceLive via the handler.
+    - **Keepalive task**: Sends periodic server-side PINGs to detect dead connections.
+
+    This prevents PING/PONG starvation (AUDIOHOOK-0006) caused by slow audio processing
+    blocking the main receive loop.
     """
     query_params = dict(websocket.query_params)
     session_id = (
@@ -191,6 +205,8 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
     handler = None
     server_seq = 0
     client_seq = 0
+    # Shared lock serializes all writes to the Genesys WebSocket (PONG, CLOSED, audio out)
+    ws_write_lock = asyncio.Lock()
 
     with tracer.start_as_current_span(
         "api.v1.genesys.stream",
@@ -198,7 +214,7 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
         attributes={"genesys.session_id": session_id},
     ) as span:
         try:
-            # Wait for OPEN before starting VoiceLive and sending OPENED
+            # ── Phase 1: Wait for OPEN before starting VoiceLive ──────────
             open_received = False
             while (
                 websocket.client_state == WebSocketState.CONNECTED
@@ -226,8 +242,6 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
 
                     if msg_type == GENESYS_OPEN:
                         server_seq += 1
-                        # Media: PCMU 8kHz mono (match Genesys AudioHook v2 protocol)
-                        # Note: uses "format" (not "codec") and "external" (not "capture"/"playback") per AudioHook v2 spec
                         opened_params = {
                             "startPaused": False,
                             "media": [
@@ -249,9 +263,6 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                     if msg_type == GENESYS_PING:
                         # Do NOT respond to PING before OPENED is sent.
                         # AudioHook v2 protocol requires that the first server message is OPENED (seq=1).
-                        # If we respond to PING with PONG here (consuming seq=1), the subsequent OPENED
-                        # will have seq=2, causing the client to reject it with "expected seq=1".
-                        # Genesys will retry PING after OPENED is sent and the session is ready.
                         logger.debug("[%s] Suppressing PING response in pre-OPEN phase", session_id)
                         continue
                     if msg_type == GENESYS_CLOSE:
@@ -268,7 +279,6 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                     continue
 
                 if binary and open_received and handler:
-                    # Forward PCMU to VoiceLive as ACS AudioData
                     b64 = base64.b64encode(binary).decode("utf-8")
                     acs_msg = json.dumps({
                         "kind": "AudioData",
@@ -285,7 +295,7 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                 span.set_status(Status(StatusCode.OK))
                 return
 
-            # Create VoiceLive handler with Genesys transport wrapper
+            # ── Phase 2: Create VoiceLive handler ─────────────────────────
             call_connection_id = f"genesys_{session_id}"
             redis_mgr = getattr(websocket.app.state, "redis", None)
             memory_manager = (
@@ -301,7 +311,7 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
             )
             websocket.state.session_id = session_id
 
-            wrapper = _GenesysWebSocketWrapper(websocket)
+            wrapper = _GenesysWebSocketWrapper(websocket, ws_write_lock)
             handler = VoiceLiveSDKHandler(
                 websocket=wrapper,
                 session_id=session_id,
@@ -327,67 +337,170 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                 })
             )
 
-            # Main loop: receive from Genesys, forward to handler
-            while (
-                websocket.client_state == WebSocketState.CONNECTED
-                and websocket.application_state == WebSocketState.CONNECTED
-            ):
-                raw = await websocket.receive()
-                if raw.get("type") == "websocket.disconnect":
-                    break
-                if raw.get("type") != "websocket.receive":
-                    continue
+            # ── Phase 3: Concurrent reader/control/audio/keepalive tasks ──
+            # Queues decouple the single WebSocket reader from processing.
+            control_queue: asyncio.Queue[dict] = asyncio.Queue()
+            audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
+            shutdown_event = asyncio.Event()
 
-                text = raw.get("text")
-                binary = raw.get("bytes")
+            # Mutable state shared across tasks via a list (to allow nonlocal mutation)
+            seq_state = {"server": server_seq, "client": client_seq, "session_id": session_id}
 
-                if text is not None:
-                    try:
-                        msg = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    msg_type = msg.get("type")
-                    client_seq = msg.get("seq", client_seq)
-                    if msg.get("id"):
-                        session_id = msg["id"]
+            async def _reader_task() -> None:
+                """Read all WebSocket frames, dispatch to control or audio queue."""
+                try:
+                    while not shutdown_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(
+                                websocket.receive(), timeout=_RECEIVE_TIMEOUT_S
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "[%s] No data from Genesys for %.0fs — closing as dead connection",
+                                seq_state["session_id"],
+                                _RECEIVE_TIMEOUT_S,
+                            )
+                            shutdown_event.set()
+                            return
 
-                    if msg_type == GENESYS_PING:
-                        server_seq += 1
-                        await websocket.send_json(
-                            _genesys_server_message(GENESYS_PONG, session_id, server_seq, client_seq)
-                        )
-                        continue
-                    if msg_type == GENESYS_UPDATE:
-                        server_seq += 1
-                        await websocket.send_json(
-                            _genesys_server_message(GENESYS_UPDATED, session_id, server_seq, client_seq)
-                        )
-                        continue
-                    if msg_type == GENESYS_CLOSE:
-                        server_seq += 1
-                        await websocket.send_json(
-                            _genesys_server_message(GENESYS_CLOSED, session_id, server_seq, client_seq)
-                        )
-                        break
-                    if msg_type in ("playback_started", "playback_completed", "playback_stopped"):
-                        continue
-                    continue
+                        if raw.get("type") == "websocket.disconnect":
+                            shutdown_event.set()
+                            return
+                        if raw.get("type") != "websocket.receive":
+                            continue
 
-                if binary:
-                    if not hasattr(genesys_audiohook_stream, '_audio_log_count'):
-                        genesys_audiohook_stream._audio_log_count = 0
-                    genesys_audiohook_stream._audio_log_count += 1
-                    if genesys_audiohook_stream._audio_log_count <= 3 or genesys_audiohook_stream._audio_log_count % 200 == 0:
-                        logger.info(
-                            "[%s] Forwarding mic audio to handler: %d bytes (chunk #%d)",
-                            session_id, len(binary), genesys_audiohook_stream._audio_log_count,
-                        )
-                    b64 = base64.b64encode(binary).decode("utf-8")
-                    acs_msg = json.dumps({
-                        "kind": "AudioData",
-                        "audioData": {"data": b64, "silent": False},
-                    })
-                    await handler.handle_audio_data(acs_msg)
+                        text = raw.get("text")
+                        binary = raw.get("bytes")
+
+                        if text is not None:
+                            try:
+                                msg = json.loads(text)
+                            except json.JSONDecodeError:
+                                continue
+                            await control_queue.put(msg)
+                        elif binary:
+                            try:
+                                audio_queue.put_nowait(binary)
+                            except asyncio.QueueFull:
+                                # Drop oldest audio chunk to prevent unbounded memory growth
+                                try:
+                                    audio_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                                audio_queue.put_nowait(binary)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug("[%s] Reader task error", seq_state["session_id"], exc_info=True)
+                finally:
+                    shutdown_event.set()
+
+            async def _control_task() -> None:
+                """Process control messages (PING, UPDATE, CLOSE) with immediate responses."""
+                try:
+                    while not shutdown_event.is_set():
+                        try:
+                            msg = await asyncio.wait_for(control_queue.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
+
+                        msg_type = msg.get("type")
+                        seq_state["client"] = msg.get("seq", seq_state["client"])
+                        if msg.get("id"):
+                            seq_state["session_id"] = msg["id"]
+
+                        sid = seq_state["session_id"]
+
+                        if msg_type == GENESYS_PING:
+                            seq_state["server"] += 1
+                            pong = _genesys_server_message(
+                                GENESYS_PONG, sid, seq_state["server"], seq_state["client"]
+                            )
+                            async with ws_write_lock:
+                                await websocket.send_json(pong)
+                            continue
+
+                        if msg_type == GENESYS_UPDATE:
+                            seq_state["server"] += 1
+                            updated = _genesys_server_message(
+                                GENESYS_UPDATED, sid, seq_state["server"], seq_state["client"]
+                            )
+                            async with ws_write_lock:
+                                await websocket.send_json(updated)
+                            continue
+
+                        if msg_type == GENESYS_CLOSE:
+                            seq_state["server"] += 1
+                            closed = _genesys_server_message(
+                                GENESYS_CLOSED, sid, seq_state["server"], seq_state["client"]
+                            )
+                            async with ws_write_lock:
+                                await websocket.send_json(closed)
+                            shutdown_event.set()
+                            return
+
+                        if msg_type in ("playback_started", "playback_completed", "playback_stopped"):
+                            continue
+
+                        logger.debug("[%s] Genesys control message type=%s", sid, msg_type)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        "[%s] Control task error", seq_state["session_id"], exc_info=True
+                    )
+                finally:
+                    shutdown_event.set()
+
+            async def _audio_task() -> None:
+                """Process audio chunks from the queue, forwarding to VoiceLive handler."""
+                audio_chunk_count = 0
+                try:
+                    while not shutdown_event.is_set():
+                        try:
+                            binary = await asyncio.wait_for(audio_queue.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
+
+                        audio_chunk_count += 1
+                        if audio_chunk_count <= 3 or audio_chunk_count % 200 == 0:
+                            logger.info(
+                                "[%s] Forwarding mic audio to handler: %d bytes (chunk #%d)",
+                                seq_state["session_id"],
+                                len(binary),
+                                audio_chunk_count,
+                            )
+                        b64 = base64.b64encode(binary).decode("utf-8")
+                        acs_msg = json.dumps({
+                            "kind": "AudioData",
+                            "audioData": {"data": b64, "silent": False},
+                        })
+                        await handler.handle_audio_data(acs_msg)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        "[%s] Audio task error", seq_state["session_id"], exc_info=True
+                    )
+                finally:
+                    shutdown_event.set()
+
+            # Launch concurrent tasks
+            # Note: No server-initiated PINGs — the AudioHook v2 protocol only allows
+            # the CLIENT (Genesys) to send PINGs. The server responds with PONGs.
+            # Dead connection detection relies on the reader task's receive timeout.
+            tasks = [
+                asyncio.create_task(_reader_task(), name=f"genesys-reader-{session_id}"),
+                asyncio.create_task(_control_task(), name=f"genesys-control-{session_id}"),
+                asyncio.create_task(_audio_task(), name=f"genesys-audio-{session_id}"),
+            ]
+            try:
+                # Wait until any task signals shutdown
+                await shutdown_event.wait()
+            finally:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
             span.set_status(Status(StatusCode.OK))
         except WebSocketDisconnect as e:
