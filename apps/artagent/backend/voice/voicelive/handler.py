@@ -959,12 +959,22 @@ class VoiceLiveSDKHandler:
                     attributes=conn_attrs,
                 ) as conn_span:
                     self._credential = self._build_credential(self._settings)
-                    self._connection_cm = connect(
+                    connect_kwargs: dict[str, Any] = dict(
                         endpoint=self._settings.azure_voicelive_endpoint,
                         credential=self._credential,
                         model=self._settings.azure_voicelive_model,
                         connection_options=connection_options,
                     )
+                    # The SDK defaults to scope "https://ai.azure.com/.default",
+                    # but Cognitive Services endpoints require the cognitiveservices scope.
+                    if (
+                        not self._settings.has_api_key_auth
+                        and "cognitiveservices" in self._settings.azure_voicelive_endpoint
+                    ):
+                        connect_kwargs["credential_scopes"] = [
+                            "https://cognitiveservices.azure.com/.default"
+                        ]
+                    self._connection_cm = connect(**connect_kwargs)
                     self._connection = await self._connection_cm.__aenter__()
                     conn_span.set_attribute("voicelive.model", self._settings.azure_voicelive_model)
 
@@ -1271,6 +1281,17 @@ class VoiceLiveSDKHandler:
                     self._event_task = None
 
             if self._connection_cm:
+                # Cancel orchestrator greeting tasks BEFORE closing the VoiceLive
+                # connection to prevent the 350ms fallback task from writing to a
+                # transport that is already in CLOSING state (race condition).
+                if self._orchestrator:
+                    try:
+                        self._orchestrator.cleanup()
+                    except Exception:
+                        logger.debug("Failed to cleanup orchestrator", exc_info=True)
+                    finally:
+                        self._orchestrator = None
+
                 try:
                     with tracer.start_as_current_span(
                         "voicelive.connection.close",
@@ -1288,9 +1309,8 @@ class VoiceLiveSDKHandler:
                 finally:
                     self._connection_cm = None
                     self._connection = None
-
-            # Cleanup orchestrator resources (greeting tasks, references)
-            if self._orchestrator:
+            elif self._orchestrator:
+                # No connection to close, but still cleanup orchestrator
                 try:
                     self._orchestrator.cleanup()
                 except Exception:
