@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import shutil
 import struct
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from src.audio_bridge import FfmpegAudioBridge
+from src.audio_bridge import FfmpegAudioBridge, start_bridge_periodic_analytics
 from src.audio_bridge.base import PCM16_FRAME_BYTES_20MS, PCMU_FRAME_BYTES_20MS, pcm16_frame_bytes_20ms
 
 
@@ -192,5 +193,96 @@ def test_pcmu_to_pcm16_24k_produces_output() -> None:
         # PCMU output should be roughly same size as original
         ratio = len(pcmu_rt) / len(pcmu_data)
         assert 0.85 < ratio < 1.15
+    finally:
+        bridge.close()
+
+
+def test_transcode_stats_and_rtf_logging(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that transcode calls populate RTF stats and emit log lines."""
+    _, _, _, pcmu_data = _read_wav_chunks(PCMU_FIXTURE)
+
+    bridge = FfmpegAudioBridge(buffer_limit_ms=TEST_BUFFER_LIMIT_MS)
+    try:
+        with caplog.at_level("INFO"):
+            pcm16 = bridge.transcode_pcmu_to_pcm16(pcmu_data)
+            assert pcm16
+            pcmu_rt = bridge.transcode_pcm16_to_pcmu(pcm16)
+            assert pcmu_rt
+
+        # --- Validate log output contains RTF lines ---
+        ingress_logs = [r for r in caplog.records if "FFmpeg ingress transcode" in r.message]
+        egress_logs = [r for r in caplog.records if "FFmpeg egress transcode" in r.message]
+        assert len(ingress_logs) >= 1, "Expected at least one ingress transcode log"
+        assert len(egress_logs) >= 1, "Expected at least one egress transcode log"
+        assert "RTF=" in ingress_logs[0].message
+        assert "transcode_ms=" in ingress_logs[0].message
+
+        # --- Validate get_stats() returns populated RTF fields ---
+        stats = bridge.get_stats()
+        assert stats.ingress_transcode_count >= 1
+        assert stats.egress_transcode_count >= 1
+        assert stats.ingress_transcode_avg_ms > 0.0
+        assert stats.egress_transcode_avg_ms > 0.0
+        # RTF should be well under 1.0 (faster than real-time)
+        assert 0.0 < stats.ingress_rtf_max < 1.0, f"ingress RTF too high: {stats.ingress_rtf_max}"
+        assert 0.0 < stats.egress_rtf_max < 1.0, f"egress RTF too high: {stats.egress_rtf_max}"
+    finally:
+        bridge.close()
+
+
+def test_get_percentile_stats() -> None:
+    """Verify percentile stats are populated after transcode calls."""
+    _, _, _, pcmu_data = _read_wav_chunks(PCMU_FIXTURE)
+
+    bridge = FfmpegAudioBridge(buffer_limit_ms=TEST_BUFFER_LIMIT_MS)
+    try:
+        pcm16 = bridge.transcode_pcmu_to_pcm16(pcmu_data)
+        assert pcm16
+        _ = bridge.transcode_pcm16_to_pcmu(pcm16)
+
+        p = bridge.get_percentile_stats()
+        assert p["ingress_n"] >= 1
+        assert p["egress_n"] >= 1
+        for direction in ("ingress", "egress"):
+            for metric in ("rtf", "latency_ms"):
+                assert p[f"{direction}_{metric}_p50"] > 0.0
+                assert p[f"{direction}_{metric}_p99"] >= p[f"{direction}_{metric}_p50"]
+                assert p[f"{direction}_{metric}_max"] >= p[f"{direction}_{metric}_p99"]
+            # RTF should be well under 1.0
+            assert p[f"{direction}_rtf_max"] < 1.0, f"{direction} RTF too high"
+    finally:
+        bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_periodic_analytics_emits_log(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify the periodic analytics task emits a log line after the interval."""
+    _, _, _, pcmu_data = _read_wav_chunks(PCMU_FIXTURE)
+
+    bridge = FfmpegAudioBridge(buffer_limit_ms=TEST_BUFFER_LIMIT_MS)
+    try:
+        # Generate some samples
+        pcm16 = bridge.transcode_pcmu_to_pcm16(pcmu_data)
+        _ = bridge.transcode_pcm16_to_pcmu(pcm16)
+
+        # Start analytics with a very short interval for testing
+        with caplog.at_level("INFO"):
+            task = await start_bridge_periodic_analytics(
+                bridge, "test-session-12345678", interval_s=0.1,
+            )
+            await asyncio.sleep(0.3)  # Let at least one tick fire
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        periodic_logs = [r for r in caplog.records if "periodic analytics" in r.message]
+        assert len(periodic_logs) >= 1, "Expected at least one periodic analytics log"
+        msg = periodic_logs[0].message
+        assert "INGRESS" in msg
+        assert "EGRESS" in msg
+        assert "p50=" in msg
+        assert "p99=" in msg
     finally:
         bridge.close()

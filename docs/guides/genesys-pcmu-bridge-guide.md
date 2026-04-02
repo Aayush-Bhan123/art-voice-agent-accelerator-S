@@ -1,7 +1,7 @@
 # Genesys PCMU ↔ PCM16 Audio Bridge — Technical Integration Guide
 
 **Audience:** Technical teams integrating Genesys Cloud with ART (Real-Time Voice Agent Accelerator)
-**Last Updated:** February 2026
+**Last Updated:** April 2026
 
 ---
 
@@ -387,6 +387,127 @@ sequenceDiagram
 
 ---
 
+## Bridge Telemetry & Observability
+
+The audio bridge emits structured telemetry at three granularities — per-frame, periodic, and session-end — all flowing to both the backend terminal and Azure Application Insights (`AppTraces`).
+
+### Per-Frame Transcode Logging
+
+Every `transcode_pcmu_to_pcm16()` (ingress) and `transcode_pcm16_to_pcmu()` (egress) call emits an `INFO`-level log line:
+
+```
+FFmpeg ingress transcode | bytes=1600 duration_ms=20.0 transcode_ms=0.42 RTF=0.0210
+FFmpeg egress transcode  | bytes=640  duration_ms=20.0 transcode_ms=0.51 RTF=0.0255
+```
+
+| Field | Meaning |
+|---|---|
+| `bytes` | Size of the input audio chunk |
+| `duration_ms` | Audio duration represented by this chunk (e.g. 20ms per frame) |
+| `transcode_ms` | Wall-clock time FFmpeg took to transcode the chunk |
+| `RTF` | **Real-Time Factor** = `transcode_ms / duration_ms`. RTF < 1.0 means faster than real-time. RTF ≥ 1.0 means the bridge is a bottleneck |
+
+**Interpreting RTF:** A healthy bridge shows RTF of 0.01–0.05 for per-frame calls (20–50× faster than real-time). If individual frames exceed RTF 0.5, investigate CPU contention.
+
+### Periodic Analytics (Every 30 Seconds)
+
+During an active call, a background task emits a percentile summary every 30 seconds:
+
+```
+FFmpeg bridge periodic analytics | session=32564f7c uptime_s=60.0
+  | INGRESS (n=1500) rtf=[p50=0.0180 p90=0.0250 p95=0.0310 p99=0.0420 max=0.0510]
+    latency_ms=[p50=0.36 p90=0.50 p95=0.62 p99=0.84 max=1.02]
+  | EGRESS (n=280) rtf=[p50=0.0220 p90=0.0340 p95=0.0410 p99=0.0580 max=0.0630]
+    latency_ms=[p50=0.44 p90=0.68 p95=0.82 p99=1.16 max=1.26]
+```
+
+This is the **key diagnostic output for latency investigations**. The percentile breakdown lets you distinguish between steady-state performance (p50) and tail latency (p99/max).
+
+| Percentile | What It Tells You |
+|---|---|
+| **p50** | Typical frame — should be well under 1ms |
+| **p90** | Most frames — should be under 1ms |
+| **p95/p99** | Tail latency — watch for CPU scheduling jitter |
+| **max** | Worst single frame — spikes here don't indicate a systemic issue |
+
+### Session Summary (At Call End)
+
+When a call disconnects, the bridge emits a final summary with aggregate stats:
+
+```
+FFmpeg bridge session summary | session=32564f7c uptime_s=185.3
+  ingress_count=9265 ingress_avg_ms=0.38 ingress_rtf_avg=0.019 ingress_rtf_max=0.042
+  egress_count=1580 egress_avg_ms=0.51 egress_rtf_avg=0.025 egress_rtf_max=0.063
+  frames_in=18530 frames_out=15800 dropped=0 buffer_depth_ms=0.0
+```
+
+### Bridge Stats API
+
+The bridge exposes `get_stats()` and `get_percentile_stats()` programmatically for custom monitoring integrations:
+
+```python
+stats = bridge.get_stats()
+# stats.ingress_transcode_count, stats.ingress_rtf_avg, stats.ingress_rtf_max
+# stats.egress_transcode_count, stats.egress_rtf_avg, stats.egress_rtf_max
+# stats.frames_in, stats.frames_out, stats.dropped_frames, stats.buffer_depth_ms
+
+percentiles = bridge.get_percentile_stats()
+# percentiles["ingress_rtf_p50"], percentiles["ingress_rtf_p99"], etc.
+# percentiles["egress_latency_ms_p95"], percentiles["egress_latency_ms_max"], etc.
+```
+
+### Querying Bridge Telemetry in Application Insights
+
+All bridge log lines flow to AppTraces via OpenTelemetry. Use these KQL queries:
+
+**Per-session RTF summary:**
+```kql
+AppTraces
+| where Message has "FFmpeg bridge session summary"
+| parse Message with * "session=" SessionId " " *
+    "ingress_rtf_avg=" IngressRtfAvg " " *
+    "ingress_rtf_max=" IngressRtfMax " " *
+    "egress_rtf_avg=" EgressRtfAvg " " *
+    "egress_rtf_max=" EgressRtfMax " " *
+| project TimeGenerated, SessionId,
+    IngressRtfAvg=todouble(IngressRtfAvg),
+    IngressRtfMax=todouble(IngressRtfMax),
+    EgressRtfMax=todouble(EgressRtfMax)
+| order by TimeGenerated desc
+```
+
+**Periodic analytics for a specific session:**
+```kql
+AppTraces
+| where Message has "FFmpeg bridge periodic analytics"
+| where Message has "<session_id>"
+| order by TimeGenerated asc
+```
+
+**Detect bridge bottleneck across all sessions:**
+```kql
+AppTraces
+| where Message has "FFmpeg bridge session summary"
+| parse Message with * "ingress_rtf_max=" IngressRtfMax " " *
+| where todouble(IngressRtfMax) > 0.5
+| project TimeGenerated, Message
+```
+
+### Baseline Test Results
+
+Tested on a developer workstation with an 18-second real-world insurance subrogation audio recording:
+
+| Direction | Audio Duration | Transcode Time | RTF | Meaning |
+|---|---|---|---|---|
+| **Ingress** (PCMU→PCM16) | 18.2s | 4.97s | **0.273** | 3.7× faster than real-time |
+| **Egress** (PCM16→PCMU) | 18.2s | 4.97s | **0.274** | 3.7× faster than real-time |
+
+These are **batch mode** results (entire file at once). In a live call with 20ms frames, per-frame RTF will be significantly lower (0.01–0.05 range) because each frame is only 160–960 bytes.
+
+**Bottom line:** The FFmpeg bridge has ~73% headroom on a single core. It is not a latency bottleneck.
+
+---
+
 ## FAQ
 
 **Q: Does this add latency to the call?**
@@ -417,6 +538,8 @@ No. The bridge works inside ART. Your Genesys setup — WebSocket URL, audio for
 - [ ] Place a test call through Genesys
 - [ ] Verify STT produces correct transcripts
 - [ ] Check bridge stats for `dropped_frames == 0`
+- [ ] Verify periodic analytics shows RTF p99 < 0.5 (healthy threshold)
+- [ ] Query AppTraces for `FFmpeg bridge session summary` to confirm telemetry flows to App Insights
 - [ ] Deploy to production
 
 ---

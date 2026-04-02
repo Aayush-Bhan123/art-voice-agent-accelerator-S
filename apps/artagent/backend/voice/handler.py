@@ -84,7 +84,7 @@ from apps.artagent.backend.voice.shared.config_resolver import resolve_orchestra
 
 # Pool management
 from src.pools.session_manager import SessionContext
-from src.audio_bridge import FfmpegAudioBridge
+from src.audio_bridge import FfmpegAudioBridge, start_bridge_periodic_analytics
 from src.stateful.state_managment import MemoManager
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
 from src.enums.stream_modes import StreamMode
@@ -375,6 +375,9 @@ class VoiceHandler:
         if context.bridge_mode == "pcmu_pcm16":
             try:
                 context.audio_bridge = FfmpegAudioBridge(buffer_limit_ms=BRIDGE_BUFFER_LIMIT_MS)
+                context._bridge_analytics_task = await start_bridge_periodic_analytics(
+                    context.audio_bridge, session_key, interval_s=30.0,
+                )
             except Exception as exc:
                 logger.error("[%s] Failed to initialize audio bridge: %s", session_key[-8:], exc)
                 if BRIDGE_FAIL_CLOSED:
@@ -636,10 +639,35 @@ class VoiceHandler:
             return b""
 
     def _close_audio_bridge(self) -> None:
+        # Cancel periodic analytics reporter
+        analytics_task = getattr(self._context, "_bridge_analytics_task", None)
+        if analytics_task is not None:
+            analytics_task.cancel()
+            self._context._bridge_analytics_task = None
+
         bridge = self._context.audio_bridge
         self._context.audio_bridge = None
         if bridge is None:
             return
+        try:
+            stats = bridge.get_stats()
+            logger.info(
+                "FFmpeg bridge session summary | session=%s "
+                "uptime_s=%.1f "
+                "ingress_count=%d ingress_avg_ms=%.2f ingress_rtf_avg=%.4f ingress_rtf_max=%.4f "
+                "egress_count=%d egress_avg_ms=%.2f egress_rtf_avg=%.4f egress_rtf_max=%.4f "
+                "frames_in=%d frames_out=%d dropped=%d buffer_depth_ms=%.1f",
+                self._session_short,
+                stats.bridge_uptime_s,
+                stats.ingress_transcode_count, stats.ingress_transcode_avg_ms,
+                stats.ingress_rtf_avg, stats.ingress_rtf_max,
+                stats.egress_transcode_count, stats.egress_transcode_avg_ms,
+                stats.egress_rtf_avg, stats.egress_rtf_max,
+                stats.frames_in, stats.frames_out,
+                stats.dropped_frames, stats.buffer_depth_ms,
+            )
+        except Exception:
+            logger.debug("[%s] Failed to collect bridge stats", self._session_short, exc_info=True)
         try:
             bridge.close()
         except Exception as exc:

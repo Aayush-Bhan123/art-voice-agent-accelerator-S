@@ -33,6 +33,17 @@ class AudioBridgeStats:
     ffmpeg_pid_l2u: int | None = None
     ffmpeg_restarts: int = 0
     bridge_uptime_s: float = 0.0
+    # Transcode timing / RTF metrics
+    ingress_transcode_count: int = 0
+    ingress_transcode_total_ms: float = 0.0
+    ingress_transcode_avg_ms: float = 0.0
+    ingress_rtf_avg: float = 0.0
+    ingress_rtf_max: float = 0.0
+    egress_transcode_count: int = 0
+    egress_transcode_total_ms: float = 0.0
+    egress_transcode_avg_ms: float = 0.0
+    egress_rtf_avg: float = 0.0
+    egress_rtf_max: float = 0.0
 
 
 class AudioBridge(Protocol):
