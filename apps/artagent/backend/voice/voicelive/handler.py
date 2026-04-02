@@ -932,6 +932,9 @@ class VoiceLiveSDKHandler:
                             buffer_limit_ms=_BRIDGE_BUFFER_LIMIT_MS,
                             pcm16_sample_rate=24000,
                         )
+                        self._bridge_analytics_task = await start_bridge_periodic_analytics(
+                            self._audio_bridge, self.session_id, interval_s=30.0,
+                        )
                         logger.info(
                             "Audio bridge initialized for VoiceLive | session=%s rate=24000",
                             self.session_id,
@@ -1235,9 +1238,32 @@ class VoiceLiveSDKHandler:
             self._shutdown.set()
 
             # Close audio bridge if active
+            if self._bridge_analytics_task is not None:
+                self._bridge_analytics_task.cancel()
+                self._bridge_analytics_task = None
+
             bridge = self._audio_bridge
             self._audio_bridge = None
             if bridge is not None:
+                try:
+                    stats = bridge.get_stats()
+                    logger.info(
+                        "FFmpeg bridge session summary | session=%s "
+                        "uptime_s=%.1f "
+                        "ingress_count=%d ingress_avg_ms=%.2f ingress_rtf_avg=%.4f ingress_rtf_max=%.4f "
+                        "egress_count=%d egress_avg_ms=%.2f egress_rtf_avg=%.4f egress_rtf_max=%.4f "
+                        "frames_in=%d frames_out=%d dropped=%d buffer_depth_ms=%.1f",
+                        self.session_id,
+                        stats.bridge_uptime_s,
+                        stats.ingress_transcode_count, stats.ingress_transcode_avg_ms,
+                        stats.ingress_rtf_avg, stats.ingress_rtf_max,
+                        stats.egress_transcode_count, stats.egress_transcode_avg_ms,
+                        stats.egress_rtf_avg, stats.egress_rtf_max,
+                        stats.frames_in, stats.frames_out,
+                        stats.dropped_frames, stats.buffer_depth_ms,
+                    )
+                except Exception:
+                    logger.debug("Failed to collect bridge stats", exc_info=True)
                 try:
                     bridge.close()
                 except Exception:

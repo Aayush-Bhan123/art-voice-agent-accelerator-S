@@ -637,10 +637,35 @@ class VoiceHandler:
             return b""
 
     def _close_audio_bridge(self) -> None:
+        # Cancel periodic analytics reporter
+        analytics_task = getattr(self._context, "_bridge_analytics_task", None)
+        if analytics_task is not None:
+            analytics_task.cancel()
+            self._context._bridge_analytics_task = None
+
         bridge = self._context.audio_bridge
         self._context.audio_bridge = None
         if bridge is None:
             return
+        try:
+            stats = bridge.get_stats()
+            logger.info(
+                "FFmpeg bridge session summary | session=%s "
+                "uptime_s=%.1f "
+                "ingress_count=%d ingress_avg_ms=%.2f ingress_rtf_avg=%.4f ingress_rtf_max=%.4f "
+                "egress_count=%d egress_avg_ms=%.2f egress_rtf_avg=%.4f egress_rtf_max=%.4f "
+                "frames_in=%d frames_out=%d dropped=%d buffer_depth_ms=%.1f",
+                self._session_short,
+                stats.bridge_uptime_s,
+                stats.ingress_transcode_count, stats.ingress_transcode_avg_ms,
+                stats.ingress_rtf_avg, stats.ingress_rtf_max,
+                stats.egress_transcode_count, stats.egress_transcode_avg_ms,
+                stats.egress_rtf_avg, stats.egress_rtf_max,
+                stats.frames_in, stats.frames_out,
+                stats.dropped_frames, stats.buffer_depth_ms,
+            )
+        except Exception:
+            logger.debug("[%s] Failed to collect bridge stats", self._session_short, exc_info=True)
         try:
             bridge.close()
         except Exception as exc:

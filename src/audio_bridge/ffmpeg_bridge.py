@@ -18,6 +18,8 @@ from src.audio_bridge.base import (
     pcm16_frame_bytes_20ms,
 )
 
+_MAX_SAMPLES = 5000  # ~100s of 20ms frames
+
 logger = get_logger(__name__)
 
 
@@ -204,6 +206,18 @@ class FfmpegAudioBridge:
         self._frames_out = 0
         self._bytes_in = 0
         self._bytes_out = 0
+        # Transcode timing / RTF tracking
+        self._ingress_count = 0
+        self._ingress_total_ms = 0.0
+        self._ingress_rtf_max = 0.0
+        self._egress_count = 0
+        self._egress_total_ms = 0.0
+        self._egress_rtf_max = 0.0
+        # Per-call sample deques for percentile analytics
+        self._ingress_rtf_samples: deque[float] = deque(maxlen=_MAX_SAMPLES)
+        self._ingress_latency_samples: deque[float] = deque(maxlen=_MAX_SAMPLES)
+        self._egress_rtf_samples: deque[float] = deque(maxlen=_MAX_SAMPLES)
+        self._egress_latency_samples: deque[float] = deque(maxlen=_MAX_SAMPLES)
 
     def push_pcmu(self, pcmu_bytes: bytes, *, frame_ms: int | None = None) -> None:
         del frame_ms
@@ -238,6 +252,7 @@ class FfmpegAudioBridge:
     def transcode_pcmu_to_pcm16(self, pcmu_bytes: bytes, *, timeout_s: float = 0.25) -> bytes:
         if not pcmu_bytes:
             return b""
+        t0 = time.perf_counter()
         out = deque()
         chunk_size = PCMU_FRAME_BYTES_20MS * 10
         for idx in range(0, len(pcmu_bytes), chunk_size):
@@ -248,11 +263,14 @@ class FfmpegAudioBridge:
         tail = self._drain_with_condition(self._u2l, timeout_s=timeout_s)
         if tail:
             out.append(tail)
-        return b"".join(out)
+        result = b"".join(out)
+        self._record_transcode("ingress", t0, len(pcmu_bytes), PCMU_SAMPLE_RATE, 1)
+        return result
 
     def transcode_pcm16_to_pcmu(self, pcm16_bytes: bytes, *, timeout_s: float = 0.25) -> bytes:
         if not pcm16_bytes:
             return b""
+        t0 = time.perf_counter()
         out = deque()
         chunk_size = self._pcm16_frame_bytes * 10
         for idx in range(0, len(pcm16_bytes), chunk_size):
@@ -263,7 +281,32 @@ class FfmpegAudioBridge:
         tail = self._drain_with_condition(self._l2u, timeout_s=timeout_s)
         if tail:
             out.append(tail)
-        return b"".join(out)
+        result = b"".join(out)
+        self._record_transcode("egress", t0, len(pcm16_bytes), self._pcm16_sample_rate, 2)
+        return result
+
+    def _record_transcode(self, direction: str, t0: float, input_bytes: int, sample_rate: int, bytes_per_sample: int) -> None:
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        audio_duration_ms = (input_bytes / (sample_rate * bytes_per_sample)) * 1000.0 if input_bytes else 0.0
+        rtf = (elapsed_ms / audio_duration_ms) if audio_duration_ms > 0 else 0.0
+
+        if direction == "ingress":
+            self._ingress_count += 1
+            self._ingress_total_ms += elapsed_ms
+            self._ingress_rtf_max = max(self._ingress_rtf_max, rtf)
+            self._ingress_rtf_samples.append(rtf)
+            self._ingress_latency_samples.append(elapsed_ms)
+        else:
+            self._egress_count += 1
+            self._egress_total_ms += elapsed_ms
+            self._egress_rtf_max = max(self._egress_rtf_max, rtf)
+            self._egress_rtf_samples.append(rtf)
+            self._egress_latency_samples.append(elapsed_ms)
+
+        logger.info(
+            "FFmpeg %s transcode | bytes=%d duration_ms=%.1f transcode_ms=%.2f RTF=%.4f",
+            direction, input_bytes, audio_duration_ms, elapsed_ms, rtf,
+        )
 
     def get_stats(self) -> AudioBridgeStats:
         dropped = self._u2l.dropped_frames + self._l2u.dropped_frames
@@ -271,6 +314,17 @@ class FfmpegAudioBridge:
             self._u2l.buffer_depth_ms(self._pcm16_sample_rate * 2),
             self._l2u.buffer_depth_ms(PCMU_SAMPLE_RATE),
         )
+        ingress_avg_ms = (self._ingress_total_ms / self._ingress_count) if self._ingress_count else 0.0
+        ingress_avg_rtf = 0.0
+        if self._ingress_count and self._ingress_total_ms > 0:
+            # Approximate average RTF from aggregate totals
+            total_audio_ms = (self._bytes_in / max(PCMU_SAMPLE_RATE, 1)) * 1000.0
+            ingress_avg_rtf = (self._ingress_total_ms / total_audio_ms) if total_audio_ms > 0 else 0.0
+        egress_avg_ms = (self._egress_total_ms / self._egress_count) if self._egress_count else 0.0
+        egress_avg_rtf = 0.0
+        if self._egress_count and self._egress_total_ms > 0:
+            total_audio_out_ms = (self._bytes_out / max(PCMU_SAMPLE_RATE, 1)) * 1000.0
+            egress_avg_rtf = (self._egress_total_ms / total_audio_out_ms) if total_audio_out_ms > 0 else 0.0
         return AudioBridgeStats(
             active_input_codec="pcmu",
             active_output_codec="pcm16",
@@ -286,7 +340,37 @@ class FfmpegAudioBridge:
             ffmpeg_pid_l2u=self._l2u.pid,
             ffmpeg_restarts=0,
             bridge_uptime_s=max(0.0, time.monotonic() - self._started_at),
+            ingress_transcode_count=self._ingress_count,
+            ingress_transcode_total_ms=self._ingress_total_ms,
+            ingress_transcode_avg_ms=ingress_avg_ms,
+            ingress_rtf_avg=ingress_avg_rtf,
+            ingress_rtf_max=self._ingress_rtf_max,
+            egress_transcode_count=self._egress_count,
+            egress_transcode_total_ms=self._egress_total_ms,
+            egress_transcode_avg_ms=egress_avg_ms,
+            egress_rtf_avg=egress_avg_rtf,
+            egress_rtf_max=self._egress_rtf_max,
         )
+
+    def get_percentile_stats(self) -> dict[str, float]:
+        """Compute percentile analytics from stored per-call samples.
+
+        Returns a flat dict with P50/P90/P95/P99/max for both directions'
+        RTF and latency, plus current uptime and sample counts.
+        """
+        result: dict[str, float] = {
+            "uptime_s": max(0.0, time.monotonic() - self._started_at),
+        }
+        for prefix, rtf_samples, lat_samples in (
+            ("ingress", self._ingress_rtf_samples, self._ingress_latency_samples),
+            ("egress", self._egress_rtf_samples, self._egress_latency_samples),
+        ):
+            result[f"{prefix}_n"] = float(len(rtf_samples))
+            for metric_name, samples in (("rtf", rtf_samples), ("latency_ms", lat_samples)):
+                for label, q in (("p50", 50), ("p90", 90), ("p95", 95), ("p99", 99)):
+                    result[f"{prefix}_{metric_name}_{label}"] = _percentile(samples, q)
+                result[f"{prefix}_{metric_name}_max"] = max(samples) if samples else 0.0
+        return result
 
     def close(self) -> None:
         self._u2l.close()
@@ -334,3 +418,59 @@ class FfmpegAudioBridge:
             if saw_data and time.monotonic() >= quiet_deadline:
                 break
         return b"".join(chunks)
+
+
+# ---- Percentile helper & periodic analytics reporter ----
+
+def _percentile(samples: deque[float], q: int) -> float:
+    """Compute the *q*-th percentile from a deque of floats (nearest-rank)."""
+    n = len(samples)
+    if n == 0:
+        return 0.0
+    sorted_s = sorted(samples)
+    idx = int(math.ceil(q / 100.0 * n)) - 1
+    return sorted_s[max(idx, 0)]
+
+
+async def start_bridge_periodic_analytics(
+    bridge: FfmpegAudioBridge,
+    session_id: str,
+    *,
+    interval_s: float = 30.0,
+) -> "asyncio.Task[None]":
+    """Launch a background asyncio task that logs percentile analytics every *interval_s*.
+
+    Returns the task so the caller can cancel it during bridge teardown.
+    """
+    import asyncio
+
+    async def _loop() -> None:
+        short_id = session_id[-8:] if session_id else "unknown"
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                p = bridge.get_percentile_stats()
+            except Exception:
+                break  # bridge likely closed
+            logger.info(
+                "FFmpeg bridge periodic analytics | session=%s uptime_s=%.1f "
+                "| INGRESS (n=%.0f) rtf=[p50=%.4f p90=%.4f p95=%.4f p99=%.4f max=%.4f] "
+                "latency_ms=[p50=%.2f p90=%.2f p95=%.2f p99=%.2f max=%.2f] "
+                "| EGRESS (n=%.0f) rtf=[p50=%.4f p90=%.4f p95=%.4f p99=%.4f max=%.4f] "
+                "latency_ms=[p50=%.2f p90=%.2f p95=%.2f p99=%.2f max=%.2f]",
+                short_id,
+                p["uptime_s"],
+                p["ingress_n"],
+                p["ingress_rtf_p50"], p["ingress_rtf_p90"],
+                p["ingress_rtf_p95"], p["ingress_rtf_p99"], p["ingress_rtf_max"],
+                p["ingress_latency_ms_p50"], p["ingress_latency_ms_p90"],
+                p["ingress_latency_ms_p95"], p["ingress_latency_ms_p99"], p["ingress_latency_ms_max"],
+                p["egress_n"],
+                p["egress_rtf_p50"], p["egress_rtf_p90"],
+                p["egress_rtf_p95"], p["egress_rtf_p99"], p["egress_rtf_max"],
+                p["egress_latency_ms_p50"], p["egress_latency_ms_p90"],
+                p["egress_latency_ms_p95"], p["egress_latency_ms_p99"], p["egress_latency_ms_max"],
+            )
+
+    task = asyncio.create_task(_loop(), name=f"bridge-analytics-{session_id[-8:]}")
+    return task
