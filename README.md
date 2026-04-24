@@ -2,7 +2,7 @@
 
 <div align="center">
 
-# Azure Real-Time (ART) Agent Accelerator
+# Azure Real-Time (ART) Agent Accelerator 
 
 [📖 Documentation](https://aiappsgbbfactory.github.io/art-voice-agent-accelerator/) · [🚀 Quick Start](#getting-started) · [🏗️ Architecture](#the-how-architecture) · [🎨 Community](docs/community/artist-certification.md)
 
