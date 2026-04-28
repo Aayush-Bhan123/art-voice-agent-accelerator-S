@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import shutil
 import subprocess
 import threading
@@ -39,7 +40,7 @@ class _FfmpegPipe:
         self._name = name
         self._process: subprocess.Popen[bytes] | None = None
         self._buffer = bytearray()
-        self._lock = threading.Lock()
+        self._data_ready = threading.Condition()
         self._write_lock = threading.Lock()
         self._closed = False
         self._dropped_frames = 0
@@ -62,7 +63,15 @@ class _FfmpegPipe:
             "-loglevel",
             "error",
             "-nostdin",
+            "-flags",
+            "low_delay",
+            "-probesize",
+            "512",
+            "-analyzeduration",
+            "0",
             *self._input_args,
+            "-flush_packets",
+            "1",
             *self._output_args,
         ]
         self._process = subprocess.Popen(
@@ -72,6 +81,11 @@ class _FfmpegPipe:
             stderr=subprocess.PIPE,
             bufsize=0,
         )
+        # Wrap raw stdout in a small BufferedReader so read1() is available.
+        # read1() returns whatever bytes are ready (up to frame_bytes) without
+        # blocking for a full frame — this is the single biggest latency win.
+        raw_stdout = self._process.stdout
+        self._buffered_stdout = io.BufferedReader(raw_stdout, buffer_size=self._frame_bytes)
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
@@ -86,8 +100,21 @@ class _FfmpegPipe:
             process.stdin.flush()
 
     def pop(self) -> bytes:
-        with self._lock:
+        with self._data_ready:
             usable = len(self._buffer) - (len(self._buffer) % self._frame_bytes)
+            if usable <= 0:
+                return b""
+            out = bytes(self._buffer[:usable])
+            del self._buffer[:usable]
+            return out
+
+    def wait_and_pop(self, timeout_s: float) -> bytes:
+        """Block until data is available or timeout expires, then pop."""
+        with self._data_ready:
+            usable = len(self._buffer) - (len(self._buffer) % self._frame_bytes)
+            if usable <= 0:
+                self._data_ready.wait(timeout=timeout_s)
+                usable = len(self._buffer) - (len(self._buffer) % self._frame_bytes)
             if usable <= 0:
                 return b""
             out = bytes(self._buffer[:usable])
@@ -97,7 +124,7 @@ class _FfmpegPipe:
     def buffer_depth_ms(self, bytes_per_second: int) -> float:
         if bytes_per_second <= 0:
             return 0.0
-        with self._lock:
+        with self._data_ready:
             return (len(self._buffer) / float(bytes_per_second)) * 1000.0
 
     def close(self) -> None:
@@ -119,15 +146,15 @@ class _FfmpegPipe:
         self._process = None
 
     def _reader_loop(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:
+        stdout = self._buffered_stdout
+        if stdout is None:
             return
         try:
             while not self._closed:
-                chunk = process.stdout.read(self._frame_bytes)
+                chunk = stdout.read1(self._frame_bytes)
                 if not chunk:
                     break
-                with self._lock:
+                with self._data_ready:
                     total = len(self._buffer) + len(chunk)
                     if total > self._max_buffer_bytes:
                         overflow = total - self._max_buffer_bytes
@@ -137,6 +164,7 @@ class _FfmpegPipe:
                             del self._buffer[:drop_bytes]
                             self._dropped_frames += drop_bytes // self._frame_bytes
                     self._buffer.extend(chunk)
+                    self._data_ready.notify_all()
         except Exception as exc:
             logger.warning("Audio bridge reader %s stopped: %s", self._name, exc)
 
@@ -214,10 +242,10 @@ class FfmpegAudioBridge:
         chunk_size = PCMU_FRAME_BYTES_20MS * 10
         for idx in range(0, len(pcmu_bytes), chunk_size):
             self.push_pcmu(pcmu_bytes[idx : idx + chunk_size])
-            drained = self._drain_with_timeout(self.pop_pcm16, timeout_s=min(timeout_s, 0.15))
+            drained = self._drain_with_condition(self._u2l, timeout_s=min(timeout_s, 0.15))
             if drained:
                 out.append(drained)
-        tail = self._drain_with_timeout(self.pop_pcm16, timeout_s=timeout_s)
+        tail = self._drain_with_condition(self._u2l, timeout_s=timeout_s)
         if tail:
             out.append(tail)
         return b"".join(out)
@@ -229,10 +257,10 @@ class FfmpegAudioBridge:
         chunk_size = self._pcm16_frame_bytes * 10
         for idx in range(0, len(pcm16_bytes), chunk_size):
             self.push_pcm16(pcm16_bytes[idx : idx + chunk_size])
-            drained = self._drain_with_timeout(self.pop_pcmu, timeout_s=min(timeout_s, 0.15))
+            drained = self._drain_with_condition(self._l2u, timeout_s=min(timeout_s, 0.15))
             if drained:
                 out.append(drained)
-        tail = self._drain_with_timeout(self.pop_pcmu, timeout_s=timeout_s)
+        tail = self._drain_with_condition(self._l2u, timeout_s=timeout_s)
         if tail:
             out.append(tail)
         return b"".join(out)
@@ -276,9 +304,33 @@ class FfmpegAudioBridge:
                 chunks.append(chunk)
                 saw_data = True
                 # After first data arrives, keep draining until output goes quiet.
-                quiet_deadline = min(deadline, time.monotonic() + 0.03)
+                quiet_deadline = min(deadline, time.monotonic() + 0.01)
                 continue
             if saw_data and time.monotonic() >= quiet_deadline:
                 break
-            time.sleep(0.002)
+            time.sleep(0.0005)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _drain_with_condition(pipe, *, timeout_s: float) -> bytes:
+        """Drain using Condition-based wait — zero polling overhead."""
+        deadline = time.monotonic() + timeout_s
+        chunks = deque()
+        saw_data = False
+        quiet_deadline = deadline
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Use short waits: long enough to avoid busy-spin,
+            # short enough to detect silence quickly.
+            wait = min(remaining, 0.005) if not saw_data else min(remaining, 0.002)
+            chunk = pipe.wait_and_pop(timeout_s=wait)
+            if chunk:
+                chunks.append(chunk)
+                saw_data = True
+                quiet_deadline = min(deadline, time.monotonic() + 0.005)
+                continue
+            if saw_data and time.monotonic() >= quiet_deadline:
+                break
         return b"".join(chunks)

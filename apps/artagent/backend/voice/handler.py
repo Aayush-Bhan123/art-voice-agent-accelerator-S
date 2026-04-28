@@ -84,7 +84,7 @@ from apps.artagent.backend.voice.shared.config_resolver import resolve_orchestra
 
 # Pool management
 from src.pools.session_manager import SessionContext
-from src.audio_bridge import FfmpegAudioBridge
+from src.audio_bridge import FfmpegAudioBridge, AudioopAudioBridge
 from src.stateful.state_managment import MemoManager
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
 from src.enums.stream_modes import StreamMode
@@ -374,7 +374,8 @@ class VoiceHandler:
 
         if context.bridge_mode == "pcmu_pcm16":
             try:
-                context.audio_bridge = FfmpegAudioBridge(buffer_limit_ms=BRIDGE_BUFFER_LIMIT_MS)
+                # context.audio_bridge = FfmpegAudioBridge(buffer_limit_ms=BRIDGE_BUFFER_LIMIT_MS)
+                context.audio_bridge = AudioopAudioBridge(buffer_limit_ms=BRIDGE_BUFFER_LIMIT_MS)
             except Exception as exc:
                 logger.error("[%s] Failed to initialize audio bridge: %s", session_key[-8:], exc)
                 if BRIDGE_FAIL_CLOSED:
