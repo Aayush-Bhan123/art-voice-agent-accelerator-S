@@ -200,7 +200,7 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
         if api_key != GENESYS_WS_API_KEY:
             await websocket.close(code=3000, reason="Invalid API Key")
             return
-
+    
     await websocket.accept()
     handler = None
     server_seq = 0
