@@ -137,19 +137,47 @@ class TTSPlayback:
         """Get cancel event from context."""
         return self._context.cancel_event
 
+    # Maps BCP-47 language prefix → (voice_name, voice_style) for non-English sessions.
+    # These are native-language multilingual voices, so they handle code-switching too.
+    _LANGUAGE_VOICE_MAP: dict[str, tuple[str, str]] = {
+        "fr": ("fr-CA-SylvieNeural", None),
+        "es": ("es-ES-XimenaMultilingualNeural", "conversational"),
+        "de": ("de-DE-SeraphinaMultilingualNeural", "conversational"),
+        "it": ("it-IT-IsabellaMultilingualNeural", "conversational"),
+        "pt": ("pt-BR-ThalitaMultilingualNeural", "conversational"),
+    }
+
     def get_agent_voice(self) -> tuple[str, str | None, str | None]:
         """
         Get voice configuration from the active agent in context.
 
         Priority:
-        1. context.current_agent (already resolved)
-        2. Session agent (Agent Builder override) - fallback
-        3. Start agent from unified agents - fallback
+        1. Detected session language override (non-English → native multilingual voice)
+        2. context.current_agent (already resolved)
+        3. Session agent (Agent Builder override) - fallback
+        4. Start agent from unified agents - fallback
 
         Returns:
             Tuple of (voice_name, voice_style, voice_rate).
             voice_name will always have a value (fallback if needed).
         """
+        # Language-aware override: once a non-English language is detected for this session,
+        # lock in a native voice for the rest of the conversation regardless of agent handoffs.
+        memo = self._context.memo_manager
+        if memo:
+            detected_lang = memo.get_value_from_corememory("detected_language")
+            if detected_lang:
+                lang_prefix = detected_lang.split("-")[0].lower()
+                lang_voice = self._LANGUAGE_VOICE_MAP.get(lang_prefix)
+                if lang_voice:
+                    logger.debug(
+                        "[%s] Language-aware voice override for '%s': %s",
+                        self._session_short,
+                        detected_lang,
+                        lang_voice[0],
+                    )
+                    return (lang_voice[0], lang_voice[1], None)
+
         # First try context.current_agent (already resolved, no circular import)
         current_agent = self._context.current_agent
         if current_agent and hasattr(current_agent, "voice") and current_agent.voice:

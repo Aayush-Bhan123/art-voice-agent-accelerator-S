@@ -291,7 +291,7 @@ class SpeechConfig:
 
     # Language settings
     candidate_languages: list[str] = field(
-        default_factory=lambda: ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"]
+        default_factory=lambda: ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"]
     )
 
     # Advanced features
@@ -307,14 +307,14 @@ class SpeechConfig:
 
     def __post_init__(self):
         """Initialize default languages constant."""
-        object.__setattr__(self, "_DEFAULT_LANGS", ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"])
+        object.__setattr__(self, "_DEFAULT_LANGS", ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"])
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SpeechConfig:
         """Create SpeechConfig from dict."""
         if not data:
             return cls()
-        default_langs = ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"]
+        default_langs = ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"]
         return cls(
             vad_silence_timeout_ms=int(data.get("vad_silence_timeout_ms", 800)),
             use_semantic_segmentation=bool(data.get("use_semantic_segmentation", False)),

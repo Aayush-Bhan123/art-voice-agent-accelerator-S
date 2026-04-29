@@ -109,7 +109,7 @@ SILENCE_GAP_MS: int = 500
 # Browser transport constants
 BROWSER_PCM_SAMPLE_RATE: int = 24000
 BROWSER_SPEECH_RMS_THRESHOLD: int = 200
-BROWSER_SILENCE_GAP_SECONDS: float = 0.5
+BROWSER_SILENCE_GAP_SECONDS: float = 0.8
 # Session inactivity timeout - loaded from settings (set to 0 or negative to disable)
 try:
     from apps.artagent.backend.config.settings import (

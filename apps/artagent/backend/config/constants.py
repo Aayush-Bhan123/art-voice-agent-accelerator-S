@@ -90,7 +90,7 @@ DEFAULT_ENABLE_AUTH_VALIDATION: bool = False
 SUPPORTED_LANGUAGES: list[str] = [
     "en-US",
     "es-ES",
-    "fr-FR",
+    "fr-CA",
     "ko-KR",
     "it-IT",
 ]

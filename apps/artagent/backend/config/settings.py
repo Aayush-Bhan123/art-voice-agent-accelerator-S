@@ -317,7 +317,7 @@ SILENCE_DURATION_MS: int = _env_int("SILENCE_DURATION_MS", 1300)
 AUDIO_FORMAT: str = os.getenv("AUDIO_FORMAT", "pcm")
 STT_PROCESSING_TIMEOUT: float = _env_float("STT_PROCESSING_TIMEOUT", 10.0)
 RECOGNIZED_LANGUAGE: list[str] = _env_list(
-    "RECOGNIZED_LANGUAGE", "en-US,es-ES,fr-FR,ko-KR,it-IT,pt-PT,pt-BR"
+    "RECOGNIZED_LANGUAGE", "en-US,es-ES,fr-CA,ko-KR,it-IT,pt-PT,pt-BR"
 )
 
 # Audio bridge (PCMU <-> PCM16)

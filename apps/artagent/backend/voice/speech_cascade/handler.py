@@ -385,7 +385,7 @@ class SpeechSDKThread:
             logger.info(
                 f"[{self._conn_short}] Partial speech: '{text}' ({lang}) len={len(text.strip())}"
             )
-            if len(text.strip()) > 3:
+            if len(text.strip()) > 15:
                 try:
                     self.thread_bridge.schedule_barge_in(self.barge_in_handler)
                 except Exception as e:
@@ -727,6 +727,10 @@ class RouteTurnThread:
                     logger.error(f"[{self._conn_short}] No memory manager available")
                     return
 
+                # Track detected language for voice selection (non-English only)
+                if event.language and not event.language.startswith("en") and self.memory_manager:
+                    self.memory_manager.update_corememory("detected_language", event.language)
+
                 # Emit user transcript via callback (for transport coordination)
                 if self.on_user_transcript:
                     try:
@@ -927,7 +931,7 @@ class BargeInController:
 
     async def _reset_barge_in_state(self) -> None:
         """Reset barge-in state after brief delay."""
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
         self.barge_in_active.clear()
 
 
