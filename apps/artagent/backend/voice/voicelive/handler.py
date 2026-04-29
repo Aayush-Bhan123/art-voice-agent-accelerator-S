@@ -72,7 +72,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from utils.ml_logging import get_logger
 from utils.telemetry_decorators import ConversationTurnSpan
 
-from src.audio_bridge import FfmpegAudioBridge, AudioopAudioBridge
+from src.audio_bridge import FfmpegAudioBridge, AudioopAudioBridge, start_bridge_periodic_analytics
 
 try:
     from apps.artagent.backend.config.settings import (
@@ -795,6 +795,7 @@ class VoiceLiveSDKHandler:
         # Audio bridge for PCMU<->PCM16 conversion (Genesys integration)
         # self._audio_bridge: FfmpegAudioBridge | None = None
         self._audio_bridge: AudioopAudioBridge | None = None
+        self._bridge_analytics_task: asyncio.Task | None = None
 
         # Turn-level latency tracking
         self._turn_number: int = 0
