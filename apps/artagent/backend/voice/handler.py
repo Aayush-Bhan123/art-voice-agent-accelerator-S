@@ -789,12 +789,15 @@ class VoiceHandler:
 
     async def _handle_browser_audio(self, audio_bytes: bytes) -> None:
         """Process raw PCM audio from browser WebSocket."""
-        # Check for barge-in (RMS-based)
+        # Check for barge-in (RMS-based): only interrupt when TTS is actively playing.
+        # Note: _browser_barge_in is intentionally unused — BrowserBargeInController has
+        # no on_speech_detected() method and the field was never initialised. We trigger
+        # barge-in directly through _barge_in_controller instead.
         rms = pcm16le_rms(audio_bytes)
         if rms > BROWSER_SPEECH_RMS_THRESHOLD:
             self._touch_activity()
-            if self._browser_barge_in:
-                await self._browser_barge_in.on_speech_detected()
+            if self._tts and self._tts.is_playing and self._barge_in_controller:
+                await self._barge_in_controller.handle_barge_in()
         self.write_audio(audio_bytes)
 
     async def _handle_browser_message(self, text: str) -> None:

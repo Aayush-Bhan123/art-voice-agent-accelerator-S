@@ -781,6 +781,7 @@ class VoiceLiveSDKHandler:
         self._acs_sample_rate = 16000
         self._active_response_ids: set[str] = set()
         self._stop_audio_pending = False
+        self._cancel_in_progress = False  # True from barge-in until RESPONSE_DONE/CANCELLED
         self._response_audio_frames: dict[str, int] = {}
         self._fallback_audio_frame_index = 0
         # DTMFProcessor handles tone buffering, timing, and callbacks
@@ -1623,6 +1624,7 @@ class VoiceLiveSDKHandler:
             await self._send_audio_delta(event.delta, response_id=response_id)
 
         elif etype == ServerEventType.RESPONSE_DONE:
+            self._cancel_in_progress = False  # Response ended — resume audio for next turn
             response_id = self._extract_response_id(event)
             if response_id:
                 logger.debug(
@@ -1665,6 +1667,7 @@ class VoiceLiveSDKHandler:
             await self._start_turn_span()
 
             self._active_response_ids.clear()
+            self._cancel_in_progress = True  # Drop in-flight audio deltas until response ends
             energy = getattr(event, "speech_energy", None)
             turn_id = self._extract_item_id(event)
             resolved_turn = self._messenger.begin_user_turn(turn_id)
@@ -1761,6 +1764,15 @@ class VoiceLiveSDKHandler:
             logger.debug("Conversation item created: %s", event.item.id)
 
     async def _send_audio_delta(self, audio_bytes: bytes, *, response_id: str | None) -> None:
+        # Drop audio that arrives after a barge-in cancel — Azure may still deliver
+        # a few in-flight RESPONSE_AUDIO_DELTA chunks before honouring response.cancel().
+        if self._cancel_in_progress:
+            logger.debug(
+                "[VoiceLive] Dropping audio delta after barge-in cancel | session=%s response=%s",
+                self.session_id,
+                response_id,
+            )
+            return
         pcm_bytes = self._to_pcm_bytes(audio_bytes)
         if not pcm_bytes:
             return

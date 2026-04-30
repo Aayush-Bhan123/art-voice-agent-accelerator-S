@@ -1152,7 +1152,7 @@ class LiveOrchestrator:
         try:
             await self.conn.response.cancel()
         except Exception:
-            logger.debug("response.cancel() failed during barge-in", exc_info=True)
+            logger.warning("response.cancel() failed during barge-in — agent may keep speaking", exc_info=True)
         if self.messenger and self._active_response_id:
             try:
                 await self.messenger.send_assistant_cancelled(
