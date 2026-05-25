@@ -85,14 +85,14 @@ session:
   # Speech-to-Text configuration (VoiceLive mode)
   input_audio_transcription_settings:
     model: gpt-4o-transcribe             # STT model: gpt-4o-transcribe or whisper-1
-    language: en-US                      # Primary language: en-US, es-ES, fr-FR, etc.
+    language: en-US                      # Primary language: en-US, es-ES, fr-CA, etc.
 
   # Turn detection (when agent knows user finished speaking)
   turn_detection:
     type: azure_semantic_vad              # VAD type: azure_semantic_vad or server_vad
     threshold: 0.5                        # Sensitivity: 0.0 (less sensitive) to 1.0 (more sensitive)
     prefix_padding_ms: 240                # Start listening N ms before detected speech
-    silence_duration_ms: 720              # Wait N ms of silence before responding
+    silence_duration_ms: 1000             # Wait N ms of silence before responding
     # create_response: true                # Auto-create response after turn detection
 
   # Tool configuration
@@ -124,7 +124,7 @@ speech:
   # Voice Activity Detection (Custom VAD)
   vad:
     threshold: 0.02                       # RMS threshold for speech detection
-    silence_duration_ms: 700              # Silence duration to end turn
+    silence_duration_ms: 900              # Silence duration to end turn
     prefix_padding_ms: 200                # Audio buffer before speech starts
 
 # ─────────────────────────────────────────────────────────────────────────────

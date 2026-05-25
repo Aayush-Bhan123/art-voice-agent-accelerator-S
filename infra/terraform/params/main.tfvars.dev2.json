@@ -1,0 +1,33 @@
+{
+  "name": "artagentce",
+  "location": "canadaeast",
+  "openai_location": null,
+  "cosmosdb_location": null,
+  "acs_data_location": "Canada",
+  "disable_local_auth": true,
+  "enable_redis_ha": false,
+  "redis_sku": "MemoryOptimized_M10",
+  "redis_port": 10000,
+  "model_deployments": [
+         {
+      "name": "gpt-4.1",
+      "version": "2025-04-14",
+      "sku_name": "GlobalStandard",
+      "capacity": 300
+    },
+    {
+      "name": "text-embedding-3-large",
+      "version": "1",
+      "sku_name": "Standard",
+      "capacity": 350
+    },
+    {
+      "name": "gpt-4.1-mini",
+      "version": "2025-04-14",
+      "sku_name": "Standard",
+      "capacity": 500
+    }
+  ],
+  "mongo_database_name": "audioagentdb-dev2",
+  "mongo_collection_name": "audioagentcollection"
+}

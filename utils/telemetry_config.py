@@ -263,12 +263,8 @@ def setup_azure_monitor(logger_name: str = None) -> bool:
     """
     global _live_metrics_permanently_disabled, _azure_monitor_configured
 
-    from azure.core.exceptions import HttpResponseError, ServiceResponseError
-    from azure.monitor.opentelemetry import configure_azure_monitor
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-
-    # Allow hard opt-out for local dev or debugging
+    # Early exit before importing Azure Monitor (avoids psutil/sysctl calls that can
+    # fail in sandboxed environments e.g. Cursor terminal, macOS restrictions).
     if os.getenv("DISABLE_CLOUD_TELEMETRY", "false").lower() == "true":
         logger.info(
             "Telemetry disabled (DISABLE_CLOUD_TELEMETRY=true) – skipping Azure Monitor setup"
@@ -276,7 +272,18 @@ def setup_azure_monitor(logger_name: str = None) -> bool:
         return False
 
     connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if not connection_string:
+        logger.info(
+            "ℹ️ APPLICATIONINSIGHTS_CONNECTION_STRING not found, skipping Azure Monitor configuration"
+        )
+        return False
+
     logger_name = logger_name or os.getenv("AZURE_MONITOR_LOGGER_NAME", "")
+
+    from azure.core.exceptions import HttpResponseError, ServiceResponseError
+    from azure.monitor.opentelemetry import configure_azure_monitor
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
 
     # Check if we should disable live metrics due to permission issues
     disable_live_metrics_env = (
@@ -295,12 +302,6 @@ def setup_azure_monitor(logger_name: str = None) -> bool:
     service_version = os.getenv("SERVICE_VERSION") or os.getenv("APP_VERSION")
     if service_version:
         resource_attrs["service.version"] = service_version
-
-    if not connection_string:
-        logger.info(
-            "ℹ️ APPLICATIONINSIGHTS_CONNECTION_STRING not found, skipping Azure Monitor configuration"
-        )
-        return False
 
     logger.info(f"Setting up Azure Monitor with logger_name: {logger_name or '(root)'}")
     logger.debug(f"Connection string found: {connection_string[:50]}...")

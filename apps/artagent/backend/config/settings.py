@@ -177,8 +177,8 @@ ACS_CONNECTION_STRING: str = os.getenv("ACS_CONNECTION_STRING", "")
 ACS_SOURCE_PHONE_NUMBER: str = os.getenv("ACS_SOURCE_PHONE_NUMBER", "")
 BASE_URL: str = os.getenv("BASE_URL", "")
 
-# ACS Streaming
-ACS_STREAMING_MODE: StreamMode = StreamMode(os.getenv("ACS_STREAMING_MODE", "media").lower())
+# ACS Streaming (default: voice_live = OpenAI Realtime STT/TTS; use "media" for Cascade/Azure Speech STT+TTS)
+ACS_STREAMING_MODE: StreamMode = StreamMode(os.getenv("ACS_STREAMING_MODE", "voice_live").lower())
 
 # ACS Authentication
 ACS_JWKS_URL = "https://acscallautomation.communication.azure.com/calling/keys"
@@ -317,8 +317,13 @@ SILENCE_DURATION_MS: int = _env_int("SILENCE_DURATION_MS", 1300)
 AUDIO_FORMAT: str = os.getenv("AUDIO_FORMAT", "pcm")
 STT_PROCESSING_TIMEOUT: float = _env_float("STT_PROCESSING_TIMEOUT", 10.0)
 RECOGNIZED_LANGUAGE: list[str] = _env_list(
-    "RECOGNIZED_LANGUAGE", "en-US,es-ES,fr-FR,ko-KR,it-IT,pt-PT,pt-BR"
+    "RECOGNIZED_LANGUAGE", "en-US,es-ES,fr-CA,ko-KR,it-IT,pt-PT,pt-BR"
 )
+
+# Audio bridge (PCMU <-> PCM16)
+BRIDGE_MODE: str = os.getenv("BRIDGE_MODE", "off").strip().lower()
+AUDIO_BRIDGE_BUFFER_LIMIT_MS: int = _env_int("AUDIO_BRIDGE_BUFFER_LIMIT_MS", 500)
+AUDIO_BRIDGE_FAIL_CLOSED: bool = _env_bool("AUDIO_BRIDGE_FAIL_CLOSED", True)
 
 
 # ==============================================================================
@@ -418,6 +423,8 @@ ENTRA_EXEMPT_PATHS: list[str] = [
     "/openapi.json",
     "/metrics",
     "/v1/health",
+    "/api/v1/genesys/",
+    "/api/v1/genesys-debug/",
 ]
 
 

@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AudioConnector Test Client — ART Genesys</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 30px; color: #00d4ff; text-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
+        .status-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .status-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .status-row:last-child { border-bottom: none; }
+        .status-indicator { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .status-connected { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
+        .meter-bar { height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin: 6px 0 12px; }
+        .meter-fill { height: 100%; background: linear-gradient(90deg, #00d4ff, #00ff88); transition: width 80ms; border-radius: 4px; }
+        .status-disconnected { background: #ff4757; }
+        .status-connecting { background: #ffa502; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .controls { display: flex; gap: 16px; justify-content: center; margin: 30px 0; }
+        button {
+            padding: 16px 32px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        #startBtn { background: linear-gradient(135deg, #00d4ff, #0099cc); color: white; }
+        #startBtn:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0, 212, 255, 0.4); }
+        #startBtn:disabled { background: #444; cursor: not-allowed; transform: none; box-shadow: none; }
+        #stopBtn { background: linear-gradient(135deg, #ff4757, #cc0033); color: white; }
+        #stopBtn:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255, 71, 87, 0.4); }
+        #stopBtn:disabled { background: #444; cursor: not-allowed; transform: none; box-shadow: none; }
+        .log-container {
+            background: #0a0a0f;
+            border-radius: 12px;
+            padding: 16px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'Fira Code', monospace;
+            font-size: 13px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .log-entry { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+        .log-info { color: #00d4ff; }
+        .log-success { color: #00ff88; }
+        .log-error { color: #ff4757; }
+        .log-audio { color: #ffa502; }
+        .visualizer {
+            height: 100px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            margin: 20px 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        #waveform { width: 100%; height: 100%; }
+        .info-box {
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 20px;
+        }
+        .info-box h3 { color: #00d4ff; margin-bottom: 8px; }
+        .info-box code { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+        label { display: block; margin-bottom: 4px; font-size: 14px; }
+        input, select {
+            width: 100%;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.2);
+            background: rgba(0,0,0,0.3);
+            color: #e0e0e0;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ AudioConnector Test Client — ART Genesys</h1>
+
+        <div class="status-card">
+            <div class="status-row">
+                <span>WebSocket Connection</span>
+                <span><span class="status-indicator status-disconnected" id="wsStatus"></span><span id="wsStatusText">Disconnected</span></span>
+            </div>
+            <div class="status-row">
+                <span>Microphone</span>
+                <span><span class="status-indicator status-disconnected" id="micStatus"></span><span id="micStatusText">Not Active</span></span>
+            </div>
+            <div class="status-row">
+                <span>Audio Playback</span>
+                <span><span class="status-indicator status-disconnected" id="audioStatus"></span><span id="audioStatusText">Idle</span></span>
+            </div>
+            <div class="status-row">
+                <span>Audio received (from bot)</span>
+                <span><span class="status-indicator status-disconnected" id="rxStatus"></span><span id="rxStatusText">0 chunks · 0 B</span></span>
+            </div>
+        </div>
+
+        <div class="status-card">
+            <h3 style="margin-bottom: 8px;">🔊 Playback level</h3>
+            <p style="font-size: 12px; color: #94a3b8; margin-bottom: 6px;">Moves when bot audio is playing. If you speak and see no movement here, backend/Realtime may not be sending audio.</p>
+            <div class="meter-bar"><div id="playMeter" class="meter-fill" style="width:0%"></div></div>
+        </div>
+
+        <div class="status-card">
+            <h3 style="margin-bottom: 12px;">⚙️ Connection Settings</h3>
+            <p style="margin-bottom: 12px; color: #94a3b8; font-size: 13px;">
+                Use <strong>ART Backend</strong> to talk to this repo’s Genesys stream. Backend must be running (e.g. <code>SKIP_REDIS=1 uv run uvicorn apps.artagent.backend.main:app --port 8010</code>).
+            </p>
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <label>Connection target</label>
+                    <select id="routePattern" style="width:100%;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.3);color:#e0e0e0;">
+                        <option value="art">ART Backend (Genesys stream) — recommended</option>
+                        <option value="custom">Custom WebSocket URL</option>
+                    </select>
+                </div>
+                <div id="artUrlContainer">
+                    <label>ART backend WebSocket URL</label>
+                    <input type="text" id="artWsUrl" value="ws://localhost:8010/api/v1/genesys/stream" placeholder="ws://localhost:8010/api/v1/genesys/stream">
+                    <small style="color: #888; font-size: 12px;">Change host/port if your backend runs elsewhere.</small>
+                </div>
+                <div id="customUrlContainer" style="display: none;">
+                    <label>Custom WebSocket URL</label>
+                    <input type="text" id="customUrl" placeholder="ws://example.com:8080/path">
+                </div>
+                <div style="background: rgba(0,212,255,0.1); padding: 8px; border-radius: 6px; font-size: 12px;">
+                    <strong>Will connect to:</strong> <code id="selectedUrl" style="color: #00d4ff; word-break: break-all;">ws://localhost:8010/api/v1/genesys/stream</code>
+                </div>
+            </div>
+        </div>
+
+        <div class="visualizer">
+            <canvas id="waveform"></canvas>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" onclick="startCall()">🎤 Start Call</button>
+            <button id="stopBtn" onclick="stopCall()" disabled>⏹️ End Call</button>
+        </div>
+
+        <div class="status-card">
+            <h3 style="margin-bottom: 12px;">📋 Event Log</h3>
+            <div class="log-container" id="logContainer"></div>
+        </div>
+
+        <div class="info-box">
+            <h3>ℹ️ Why audio wasn’t working</h3>
+            <p>If you used a client that builds the URL from the <em>page’s</em> host (e.g. <code>ws://localhost:8080/</code>), it never hit ART. ART’s Genesys endpoint is <code>ws://localhost:8010/api/v1/genesys/stream</code>. This page defaults to that URL so you get two-way audio (mic → ART → Realtime → bot audio back).</p>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let sequenceNumber = 0;
+        let serverSequenceNumber = 0;
+        let audioChunksReceived = 0;
+        let audioBytesReceived = 0;
+        let lastRxLogTime = 0;
+        const sessionId = 'test-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
+
+        function updateRxStats(bytes) {
+            audioChunksReceived++;
+            audioBytesReceived += bytes;
+            document.getElementById('rxStatus').className = 'status-indicator status-connected';
+            const kb = (audioBytesReceived / 1024).toFixed(1);
+            document.getElementById('rxStatusText').textContent = audioChunksReceived + ' chunks · ' + (audioBytesReceived < 1024 ? audioBytesReceived + ' B' : kb + ' KB');
+        }
+
+        function getWsUrl() {
+            const routePattern = document.getElementById('routePattern').value;
+            if (routePattern === 'art') {
+                return document.getElementById('artWsUrl').value.trim();
+            }
+            return document.getElementById('customUrl').value.trim();
+        }
+
+        function updateUrlPreview() {
+            document.getElementById('selectedUrl').textContent = getWsUrl() || '(enter URL)';
+            document.getElementById('artUrlContainer').style.display = document.getElementById('routePattern').value === 'art' ? 'block' : 'none';
+            document.getElementById('customUrlContainer').style.display = document.getElementById('routePattern').value === 'custom' ? 'block' : 'none';
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            updateUrlPreview();
+            document.getElementById('routePattern').addEventListener('change', updateUrlPreview);
+            document.getElementById('artWsUrl').addEventListener('input', updateUrlPreview);
+            document.getElementById('customUrl').addEventListener('input', updateUrlPreview);
+        });
+
+        const MULAW_MAX = 0x1FFF;
+        const MULAW_BIAS = 33;
+
+        function linearToMulaw(sample) {
+            sample = Math.max(-32768, Math.min(32767, sample));
+            const sign = (sample < 0) ? 0x80 : 0;
+            if (sign) sample = -sample;
+            sample = Math.min(sample + MULAW_BIAS, MULAW_MAX);
+            let exponent = 7;
+            for (let expMask = 0x1000; (sample & expMask) === 0 && exponent > 0; exponent--, expMask >>= 1) {}
+            const mantissa = (sample >> (exponent + 3)) & 0x0F;
+            return ~(sign | (exponent << 4) | mantissa) & 0xFF;
+        }
+
+        function mulawToLinear(mulaw) {
+            mulaw = ~mulaw & 0xFF;
+            const sign = mulaw & 0x80;
+            const exponent = (mulaw >> 4) & 0x07;
+            const mantissa = mulaw & 0x0F;
+            let sample = ((mantissa << 3) + MULAW_BIAS) << exponent;
+            sample -= MULAW_BIAS;
+            return sign ? -sample : sample;
+        }
+
+        function log(message, type = 'info') {
+            const container = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry log-' + type;
+            entry.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function updateStatus(element, statusClass, text) {
+            document.getElementById(element).className = 'status-indicator ' + statusClass;
+            document.getElementById(element + 'Text').textContent = text;
+        }
+
+        async function startCall() {
+            try {
+                log('Starting call...', 'info');
+                document.getElementById('startBtn').disabled = true;
+                audioChunksReceived = 0;
+                audioBytesReceived = 0;
+                document.getElementById('rxStatus').className = 'status-indicator status-disconnected';
+                document.getElementById('rxStatusText').textContent = '0 chunks · 0 B';
+                document.getElementById('playMeter').style.width = '0%';
+
+                const wsUrl = getWsUrl();
+                if (!wsUrl) {
+                    alert('Please set the WebSocket URL (e.g. ws://localhost:8010/api/v1/genesys/stream for ART).');
+                    document.getElementById('startBtn').disabled = false;
+                    return;
+                }
+                if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
+                    alert('URL must start with ws:// or wss://');
+                    document.getElementById('startBtn').disabled = false;
+                    return;
+                }
+
+                log('Requesting microphone...', 'info');
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 8000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+                });
+                updateStatus('micStatus', 'status-connected', 'Active');
+                log('Microphone granted', 'success');
+
+                audioContext = new AudioContext({ sampleRate: 8000 });
+
+                log('Connecting to ' + wsUrl + '...', 'info');
+                updateStatus('wsStatus', 'status-connecting', 'Connecting...');
+
+                ws = new WebSocket(wsUrl);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onopen = () => {
+                    log('WebSocket connected', 'success');
+                    updateStatus('wsStatus', 'status-connected', 'Connected');
+                    document.getElementById('stopBtn').disabled = false;
+
+                    sendMessage('open', {
+                        organizationId: 'test-org',
+                        conversationId: sessionId,
+                        participant: { id: 'test-user', ani: '+1234567890', dnis: '+0987654321' },
+                        media: [{ type: 'audio', format: 'PCMU', channels: ['external'], rate: 8000 }],
+                        customConfig: { promptName: 'Insurance' }
+                    });
+                    startAudioCapture();
+                };
+
+                ws.onmessage = (event) => {
+                    if (typeof event.data === 'string') {
+                        const msg = JSON.parse(event.data);
+                        serverSequenceNumber = msg.seq != null ? msg.seq : serverSequenceNumber;
+                        log('Received: ' + msg.type, 'info');
+                        if (msg.type === 'opened') {
+                            log('Session opened — ready for audio', 'success');
+                        } else if (msg.type === 'closed' || msg.type === 'disconnect') {
+                            log('Server disconnect: ' + (msg.parameters && msg.parameters.info ? msg.parameters.info : 'No reason'), 'log-error');
+                            stopCall();
+                        }
+                    } else {
+                        const byteLength = event.data.byteLength || event.data.length;
+                        updateRxStats(byteLength);
+                        playAudio(event.data);
+                    }
+                };
+
+                ws.onerror = () => {
+                    log('WebSocket error', 'log-error');
+                    updateStatus('wsStatus', 'status-disconnected', 'Error');
+                };
+
+                ws.onclose = () => {
+                    log('WebSocket closed', 'info');
+                    updateStatus('wsStatus', 'status-disconnected', 'Disconnected');
+                    stopCall();
+                };
+            } catch (error) {
+                log('Error: ' + error.message, 'log-error');
+                document.getElementById('startBtn').disabled = false;
+            }
+        }
+
+        function sendMessage(type, parameters) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const msg = {
+                    version: '2',
+                    id: sessionId,
+                    type: type,
+                    seq: ++sequenceNumber,
+                    serverseq: serverSequenceNumber,
+                    parameters: parameters || {}
+                };
+                ws.send(JSON.stringify(msg));
+            }
+        }
+
+        function startAudioCapture() {
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+            processor.onaudioprocess = (e) => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const mulawData = new Uint8Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        mulawData[i] = linearToMulaw(Math.floor(inputData[i] * 32767));
+                    }
+                    ws.send(mulawData.buffer);
+                }
+            };
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+            log('Audio capture started (PCMU 8kHz)', 'log-audio');
+        }
+
+        let nextPlayTime = 0;
+
+        async function playAudio(data) {
+            if (!audioContext) return;
+            try {
+                const arrayBuffer = await data.arrayBuffer();
+                const mulawData = new Uint8Array(arrayBuffer);
+                const pcmData = new Float32Array(mulawData.length);
+                for (let i = 0; i < mulawData.length; i++) {
+                    pcmData[i] = mulawToLinear(mulawData[i]) / 32768;
+                }
+                const audioBuffer = audioContext.createBuffer(1, pcmData.length, 8000);
+                audioBuffer.getChannelData(0).set(pcmData);
+
+                updateStatus('audioStatus', 'status-connected', 'Playing');
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                const currentTime = audioContext.currentTime;
+                const startTime = Math.max(currentTime, nextPlayTime);
+                source.start(startTime);
+                nextPlayTime = startTime + audioBuffer.duration;
+
+                var rms = 0;
+                for (var i = 0; i < pcmData.length; i++) rms += pcmData[i] * pcmData[i];
+                rms = Math.sqrt(rms / pcmData.length);
+                var pct = Math.min(100, Math.round(rms * 400));
+                document.getElementById('playMeter').style.width = pct + '%';
+                setTimeout(function() {
+                    if (document.getElementById('playMeter').style.width === pct + '%') {
+                        document.getElementById('playMeter').style.width = '0%';
+                    }
+                }, 150);
+
+                source.onended = () => {
+                    if (audioContext && audioContext.currentTime >= nextPlayTime - 0.1) {
+                        updateStatus('audioStatus', 'status-disconnected', 'Idle');
+                    }
+                };
+                var now = Date.now();
+                if (now - lastRxLogTime > 2000) {
+                    log('Receiving audio: ' + audioChunksReceived + ' chunks, ' + (audioBytesReceived / 1024).toFixed(1) + ' KB total', 'log-audio');
+                    lastRxLogTime = now;
+                }
+            } catch (error) {
+                log('Playback error: ' + error.message, 'log-error');
+            }
+        }
+
+        function stopCall() {
+            log('Ending call...', 'info');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                sendMessage('close', {});
+                ws.close();
+            }
+            ws = null;
+            if (processor) { processor.disconnect(); processor = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+            nextPlayTime = 0;
+            audioChunksReceived = 0;
+            audioBytesReceived = 0;
+            document.getElementById('rxStatus').className = 'status-indicator status-disconnected';
+            document.getElementById('rxStatusText').textContent = '0 chunks · 0 B';
+            document.getElementById('playMeter').style.width = '0%';
+            updateStatus('wsStatus', 'status-disconnected', 'Disconnected');
+            updateStatus('micStatus', 'status-disconnected', 'Not Active');
+            updateStatus('audioStatus', 'status-disconnected', 'Idle');
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            log('Call ended', 'info');
+        }
+
+        const canvas = document.getElementById('waveform');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.parentElement.offsetWidth;
+        canvas.height = 100;
+        function drawWaveform() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#00d4ff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            const centerY = canvas.height / 2;
+            for (let x = 0; x < canvas.width; x++) {
+                const y = centerY + Math.sin(x * 0.05 + Date.now() * 0.005) * (audioContext ? 20 : 5);
+                if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            requestAnimationFrame(drawWaveform);
+        }
+        drawWaveform();
+    </script>
+</body>
+</html>

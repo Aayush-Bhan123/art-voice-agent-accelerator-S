@@ -72,6 +72,19 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from utils.ml_logging import get_logger
 from utils.telemetry_decorators import ConversationTurnSpan
 
+from src.audio_bridge import FfmpegAudioBridge, AudioopAudioBridge, start_bridge_periodic_analytics
+
+try:
+    from apps.artagent.backend.config.settings import (
+        AUDIO_BRIDGE_BUFFER_LIMIT_MS as _BRIDGE_BUFFER_LIMIT_MS,
+        AUDIO_BRIDGE_FAIL_CLOSED as _BRIDGE_FAIL_CLOSED,
+        BRIDGE_MODE as _BRIDGE_MODE,
+    )
+except ImportError:
+    _BRIDGE_MODE = "off"
+    _BRIDGE_BUFFER_LIMIT_MS = 500
+    _BRIDGE_FAIL_CLOSED = True
+
 from .dtmf_processor import DTMFProcessor
 from .metrics import (
     record_llm_ttft,
@@ -768,6 +781,7 @@ class VoiceLiveSDKHandler:
         self._acs_sample_rate = 16000
         self._active_response_ids: set[str] = set()
         self._stop_audio_pending = False
+        self._cancel_in_progress = False  # True from barge-in until RESPONSE_DONE/CANCELLED
         self._response_audio_frames: dict[str, int] = {}
         self._fallback_audio_frame_index = 0
         # DTMFProcessor handles tone buffering, timing, and callbacks
@@ -778,6 +792,11 @@ class VoiceLiveSDKHandler:
         )
         self._last_user_transcript: str | None = None
         self._last_user_turn_id: str | None = None
+
+        # Audio bridge for PCMU<->PCM16 conversion (Genesys integration)
+        # self._audio_bridge: FfmpegAudioBridge | None = None
+        self._audio_bridge: AudioopAudioBridge | None = None
+        self._bridge_analytics_task: asyncio.Task | None = None
 
         # Turn-level latency tracking
         self._turn_number: int = 0
@@ -904,6 +923,33 @@ class VoiceLiveSDKHandler:
                     "timeout": self._settings.ws_timeout,
                 }
 
+                # Initialize audio bridge for PCMU<->PCM16 conversion if enabled
+                if _BRIDGE_MODE == "pcmu_pcm16":
+                    try:
+                        # self._audio_bridge = FfmpegAudioBridge(
+                        #     buffer_limit_ms=_BRIDGE_BUFFER_LIMIT_MS,
+                        #     pcm16_sample_rate=24000,
+                        # )
+                        self._audio_bridge = AudioopAudioBridge(
+                            buffer_limit_ms=_BRIDGE_BUFFER_LIMIT_MS,
+                            pcm16_sample_rate=24000,
+                        )
+                        self._bridge_analytics_task = await start_bridge_periodic_analytics(
+                            self._audio_bridge, self.session_id, interval_s=30.0,
+                        )
+                        logger.info(
+                            "Audio bridge initialized for VoiceLive | session=%s rate=24000",
+                            self.session_id,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to initialize audio bridge for VoiceLive: %s | session=%s",
+                            exc,
+                            self.session_id,
+                        )
+                        if _BRIDGE_FAIL_CLOSED:
+                            raise
+
                 # Trace VoiceLive connection establishment
                 conn_attrs = create_service_dependency_attrs(
                     source_service="voicelive_sdk_handler",
@@ -918,12 +964,22 @@ class VoiceLiveSDKHandler:
                     attributes=conn_attrs,
                 ) as conn_span:
                     self._credential = self._build_credential(self._settings)
-                    self._connection_cm = connect(
+                    connect_kwargs: dict[str, Any] = dict(
                         endpoint=self._settings.azure_voicelive_endpoint,
                         credential=self._credential,
                         model=self._settings.azure_voicelive_model,
                         connection_options=connection_options,
                     )
+                    # The SDK defaults to scope "https://ai.azure.com/.default",
+                    # but Cognitive Services endpoints require the cognitiveservices scope.
+                    if (
+                        not self._settings.has_api_key_auth
+                        and "cognitiveservices" in self._settings.azure_voicelive_endpoint
+                    ):
+                        connect_kwargs["credential_scopes"] = [
+                            "https://cognitiveservices.azure.com/.default"
+                        ]
+                    self._connection_cm = connect(**connect_kwargs)
                     self._connection = await self._connection_cm.__aenter__()
                     conn_span.set_attribute("voicelive.model", self._settings.azure_voicelive_model)
 
@@ -1183,6 +1239,38 @@ class VoiceLiveSDKHandler:
             self._running = False
             self._shutdown.set()
 
+            # Close audio bridge if active
+            if self._bridge_analytics_task is not None:
+                self._bridge_analytics_task.cancel()
+                self._bridge_analytics_task = None
+
+            bridge = self._audio_bridge
+            self._audio_bridge = None
+            if bridge is not None:
+                try:
+                    stats = bridge.get_stats()
+                    logger.info(
+                        "FFmpeg bridge session summary | session=%s "
+                        "uptime_s=%.1f "
+                        "ingress_count=%d ingress_avg_ms=%.2f ingress_rtf_avg=%.4f ingress_rtf_max=%.4f "
+                        "egress_count=%d egress_avg_ms=%.2f egress_rtf_avg=%.4f egress_rtf_max=%.4f "
+                        "frames_in=%d frames_out=%d dropped=%d buffer_depth_ms=%.1f",
+                        self.session_id,
+                        stats.bridge_uptime_s,
+                        stats.ingress_transcode_count, stats.ingress_transcode_avg_ms,
+                        stats.ingress_rtf_avg, stats.ingress_rtf_max,
+                        stats.egress_transcode_count, stats.egress_transcode_avg_ms,
+                        stats.egress_rtf_avg, stats.egress_rtf_max,
+                        stats.frames_in, stats.frames_out,
+                        stats.dropped_frames, stats.buffer_depth_ms,
+                    )
+                except Exception:
+                    logger.debug("Failed to collect bridge stats", exc_info=True)
+                try:
+                    bridge.close()
+                except Exception:
+                    logger.debug("Failed to close audio bridge", exc_info=True)
+
             # Unregister from scenario update callbacks
             unregister_voicelive_orchestrator(self.session_id)
 
@@ -1221,6 +1309,17 @@ class VoiceLiveSDKHandler:
                     self._event_task = None
 
             if self._connection_cm:
+                # Cancel orchestrator greeting tasks BEFORE closing the VoiceLive
+                # connection to prevent the 350ms fallback task from writing to a
+                # transport that is already in CLOSING state (race condition).
+                if self._orchestrator:
+                    try:
+                        self._orchestrator.cleanup()
+                    except Exception:
+                        logger.debug("Failed to cleanup orchestrator", exc_info=True)
+                    finally:
+                        self._orchestrator = None
+
                 try:
                     with tracer.start_as_current_span(
                         "voicelive.connection.close",
@@ -1238,9 +1337,8 @@ class VoiceLiveSDKHandler:
                 finally:
                     self._connection_cm = None
                     self._connection = None
-
-            # Cleanup orchestrator resources (greeting tasks, references)
-            if self._orchestrator:
+            elif self._orchestrator:
+                # No connection to close, but still cleanup orchestrator
                 try:
                     self._orchestrator.cleanup()
                 except Exception:
@@ -1308,6 +1406,30 @@ class VoiceLiveSDKHandler:
             encoded = audio_section.get("data")
             if not encoded:
                 return
+            if self._audio_bridge is not None:
+                try:
+                    pcmu_bytes = base64.b64decode(encoded)
+                    pcm16_bytes = await asyncio.to_thread(
+                        self._audio_bridge.transcode_pcmu_to_pcm16, pcmu_bytes
+                    )
+                    if not pcm16_bytes:
+                        return
+                    encoded = base64.b64encode(pcm16_bytes).decode("utf-8")
+                except Exception:
+                    logger.warning(
+                        "Audio bridge ingress conversion failed | session=%s",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                    return
+            if not hasattr(self, '_input_audio_log_count'):
+                self._input_audio_log_count = 0
+            self._input_audio_log_count += 1
+            if self._input_audio_log_count <= 3 or self._input_audio_log_count % 200 == 0:
+                logger.info(
+                    "[VoiceLive] Appending audio to input buffer: %d PCM16 bytes (chunk #%d) | session=%s",
+                    len(base64.b64decode(encoded)), self._input_audio_log_count, self.session_id,
+                )
             await self._connection.input_audio_buffer.append(audio=encoded)
             return
 
@@ -1367,8 +1489,15 @@ class VoiceLiveSDKHandler:
                         else str(etype) if etype else "unknown"
                     )
 
-                    # Add span event for each VoiceLive event (batched, not per-event spans)
-                    # Filter out high-frequency noisy events
+                    if event_count <= 5 or event_type_str not in (
+                        "response.audio_transcript.delta",
+                        "response.audio.delta",
+                    ):
+                        logger.info(
+                            "[VoiceLive] Event #%d: %s | session=%s",
+                            event_count, event_type_str, self.session_id,
+                        )
+
                     if event_type_str not in (
                         "response.audio_transcript.delta",
                         "response.audio.delta",
@@ -1495,6 +1624,7 @@ class VoiceLiveSDKHandler:
             await self._send_audio_delta(event.delta, response_id=response_id)
 
         elif etype == ServerEventType.RESPONSE_DONE:
+            self._cancel_in_progress = False  # Response ended — resume audio for next turn
             response_id = self._extract_response_id(event)
             if response_id:
                 logger.debug(
@@ -1537,6 +1667,7 @@ class VoiceLiveSDKHandler:
             await self._start_turn_span()
 
             self._active_response_ids.clear()
+            self._cancel_in_progress = True  # Drop in-flight audio deltas until response ends
             energy = getattr(event, "speech_energy", None)
             turn_id = self._extract_item_id(event)
             resolved_turn = self._messenger.begin_user_turn(turn_id)
@@ -1633,12 +1764,43 @@ class VoiceLiveSDKHandler:
             logger.debug("Conversation item created: %s", event.item.id)
 
     async def _send_audio_delta(self, audio_bytes: bytes, *, response_id: str | None) -> None:
+        # Drop audio that arrives after a barge-in cancel — Azure may still deliver
+        # a few in-flight RESPONSE_AUDIO_DELTA chunks before honouring response.cancel().
+        if self._cancel_in_progress:
+            logger.debug(
+                "[VoiceLive] Dropping audio delta after barge-in cancel | session=%s response=%s",
+                self.session_id,
+                response_id,
+            )
+            return
         pcm_bytes = self._to_pcm_bytes(audio_bytes)
         if not pcm_bytes:
             return
 
-        # Resample VoiceLive 24 kHz PCM to match ACS expectations.
-        resampled = self._resample_audio(pcm_bytes)
+        # When bridge is active, convert PCM16 24kHz → PCMU 8kHz for Genesys.
+        # Otherwise, resample 24kHz → ACS target rate (default 16kHz).
+        if self._audio_bridge is not None:
+            try:
+                pcmu_bytes = await asyncio.to_thread(
+                    self._audio_bridge.transcode_pcm16_to_pcmu, pcm_bytes
+                )
+                resampled = base64.b64encode(pcmu_bytes).decode("utf-8") if pcmu_bytes else None
+            except Exception:
+                logger.info("Audio bridge egress conversion failed | session=%s", self.session_id, exc_info=True)
+                resampled = None
+            if not resampled:
+                if not hasattr(self, '_egress_empty_count'):
+                    self._egress_empty_count = 0
+                self._egress_empty_count += 1
+                if self._egress_empty_count <= 3:
+                    logger.info(
+                        "[VoiceLive] Bridge returned empty PCMU (input=%d PCM16 bytes, empty #%d) | session=%s",
+                        len(pcm_bytes), self._egress_empty_count, self.session_id,
+                    )
+                return
+        else:
+            # Resample VoiceLive 24 kHz PCM to match ACS expectations.
+            resampled = self._resample_audio(pcm_bytes)
         frame_index = self._allocate_frame_index(response_id)
         try:
             logger.debug(

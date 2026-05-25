@@ -291,7 +291,7 @@ class SpeechConfig:
 
     # Language settings
     candidate_languages: list[str] = field(
-        default_factory=lambda: ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"]
+        default_factory=lambda: ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"]
     )
 
     # Advanced features
@@ -307,14 +307,14 @@ class SpeechConfig:
 
     def __post_init__(self):
         """Initialize default languages constant."""
-        object.__setattr__(self, "_DEFAULT_LANGS", ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"])
+        object.__setattr__(self, "_DEFAULT_LANGS", ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"])
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SpeechConfig:
         """Create SpeechConfig from dict."""
         if not data:
             return cls()
-        default_langs = ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"]
+        default_langs = ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"]
         return cls(
             vad_silence_timeout_ms=int(data.get("vad_silence_timeout_ms", 800)),
             use_semantic_segmentation=bool(data.get("use_semantic_segmentation", False)),
@@ -1114,6 +1114,11 @@ class UnifiedAgent:
         if not say:
             return
 
+        # Validate connection is still active before attempting to send
+        if not conn or not hasattr(conn, 'send'):
+            logger.warning("[%s] VoiceLive connection not available - skipping response trigger", self.name)
+            return
+
         # Cancel any active response first to avoid conflicts
         if cancel_active:
             try:
@@ -1138,7 +1143,7 @@ class UnifiedAgent:
             )
             logger.debug("[%s] Triggered verbatim greeting response", self.name)
         except Exception as e:
-            logger.warning("trigger_voicelive_response failed: %s", e)
+            logger.debug("trigger_voicelive_response warning (connection may be closing): %s", e)
 
     def __repr__(self) -> str:
         return (

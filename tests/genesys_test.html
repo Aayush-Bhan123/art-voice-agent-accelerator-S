@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Genesys AudioHook Test — ART</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #0f172a; color: #e2e8f0; padding: 2rem; }
+  h1 { font-size: 1.4rem; margin-bottom: 1rem; color: #38bdf8; }
+  .panel { background: #1e293b; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
+  label { display: block; font-size: .85rem; color: #94a3b8; margin-bottom: .3rem; }
+  input, select { width: 100%; padding: .5rem .75rem; border-radius: 6px; border: 1px solid #334155;
+                  background: #0f172a; color: #e2e8f0; font-size: .9rem; margin-bottom: .75rem; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 200px; }
+  button { padding: .6rem 1.4rem; border-radius: 8px; border: none; font-weight: 600;
+           font-size: .9rem; cursor: pointer; transition: all .15s; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #btnConnect { background: #22c55e; color: #fff; }
+  #btnConnect:hover:not(:disabled) { background: #16a34a; }
+  #btnDisconnect { background: #ef4444; color: #fff; }
+  #btnDisconnect:hover:not(:disabled) { background: #dc2626; }
+  #btnMic { background: #3b82f6; color: #fff; }
+  #btnMic:hover:not(:disabled) { background: #2563eb; }
+  .status { display: inline-block; padding: .25rem .75rem; border-radius: 20px;
+            font-size: .8rem; font-weight: 600; margin-left: .5rem; }
+  .status.connected { background: #166534; color: #4ade80; }
+  .status.disconnected { background: #7f1d1d; color: #fca5a5; }
+  .status.connecting { background: #854d0e; color: #fde047; }
+  #log { background: #020617; border-radius: 8px; padding: 1rem; font-family: 'SF Mono', Consolas, monospace;
+         font-size: .78rem; line-height: 1.6; max-height: 400px; overflow-y: auto; white-space: pre-wrap;
+         border: 1px solid #1e293b; }
+  .log-info { color: #38bdf8; }
+  .log-send { color: #4ade80; }
+  .log-recv { color: #c084fc; }
+  .log-error { color: #f87171; }
+  .log-audio { color: #94a3b8; }
+  .meter-bar { height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden; margin: .3rem 0 .75rem; }
+  .meter-fill { height: 100%; background: #22c55e; transition: width 50ms; }
+  .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+<h1>Genesys AudioHook Test <span id="wsStatus" class="status disconnected">Disconnected</span></h1>
+
+<div class="panel">
+  <div class="row">
+    <div>
+      <label>WebSocket URL</label>
+      <input id="wsUrl" value="ws://localhost:8010/api/v1/genesys/stream" placeholder="Full ART local: ws://localhost:8010 | Deployed: wss://.../api/v1/genesys/stream">
+    </div>
+    <div>
+      <label>Session ID (optional)</label>
+      <input id="sessionId" placeholder="auto-generated if empty">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label>API Key (optional)</label>
+      <input id="apiKey" type="password" placeholder="GENESYS_WS_API_KEY value">
+    </div>
+  </div>
+  <div class="controls">
+    <button id="btnConnect" onclick="doConnect()">Connect</button>
+    <button id="btnDisconnect" onclick="doDisconnect()" disabled>Disconnect</button>
+    <button id="btnMic" onclick="toggleMic()" disabled>Start Mic</button>
+  </div>
+</div>
+
+<div class="panel">
+  <label>Mic Level</label>
+  <div class="meter-bar"><div id="micMeter" class="meter-fill" style="width:0%"></div></div>
+  <label>Playback Level</label>
+  <div class="meter-bar"><div id="playMeter" class="meter-fill" style="width:0%"></div></div>
+</div>
+
+<div class="panel">
+  <label>Log</label>
+  <div id="log"></div>
+</div>
+
+<script>
+// Mu-law encoding/decoding tables
+const MULAW_BIAS = 0x84;
+const MULAW_CLIP = 32635;
+const EXP_TABLE = [0,132,396,924,1980,4092,8316,16764];
+
+function linearToMulaw(sample) {
+  let sign = (sample >> 8) & 0x80;
+  if (sign) sample = -sample;
+  if (sample > MULAW_CLIP) sample = MULAW_CLIP;
+  sample += MULAW_BIAS;
+  let exponent = 7;
+  for (let mask = 0x4000; exponent > 0; exponent--, mask >>= 1) {
+    if (sample & mask) break;
+  }
+  let mantissa = (sample >> (exponent + 3)) & 0x0F;
+  return ~(sign | (exponent << 4) | mantissa) & 0xFF;
+}
+
+function mulawToLinear(mulaw) {
+  mulaw = ~mulaw & 0xFF;
+  let sign = mulaw & 0x80;
+  let exponent = (mulaw >> 4) & 0x07;
+  let mantissa = mulaw & 0x0F;
+  let sample = EXP_TABLE[exponent] + (mantissa << (exponent + 3));
+  if (sign) sample = -sample;
+  return sample;
+}
+
+function pcm16ToMulaw(pcm16Array) {
+  const out = new Uint8Array(pcm16Array.length);
+  for (let i = 0; i < pcm16Array.length; i++) {
+    out[i] = linearToMulaw(pcm16Array[i]);
+  }
+  return out;
+}
+
+function mulawToPcmFloat(mulawBytes) {
+  const out = new Float32Array(mulawBytes.length);
+  for (let i = 0; i < mulawBytes.length; i++) {
+    out[i] = mulawToLinear(mulawBytes[i]) / 32768.0;
+  }
+  return out;
+}
+
+// Globals
+let ws = null;
+let micStream = null;
+let micProcessor = null;
+let audioCtx = null;
+let serverSeq = 0;
+let playbackQueue = [];
+let isPlaying = false;
+let micActive = false;
+
+const logEl = document.getElementById('log');
+const wsStatus = document.getElementById('wsStatus');
+
+function log(msg, cls = 'log-info') {
+  const ts = new Date().toISOString().substr(11, 12);
+  logEl.innerHTML += `<span class="${cls}">[${ts}] ${msg}</span>\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text, cls) {
+  wsStatus.textContent = text;
+  wsStatus.className = 'status ' + cls;
+}
+
+function doConnect() {
+  let url = document.getElementById('wsUrl').value.trim();
+  // If empty, use same host as current page (for when served from backend /api/v1/genesys/test)
+  if (!url && typeof location !== 'undefined') {
+    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url = scheme + '//' + location.host + '/api/v1/genesys/stream';
+    document.getElementById('wsUrl').value = url;
+  }
+  const sessionId = document.getElementById('sessionId').value.trim() || ('test_' + Date.now());
+  const apiKey = document.getElementById('apiKey').value.trim();
+
+  if (!url) { log('URL required', 'log-error'); return; }
+
+  setStatus('Connecting…', 'connecting');
+  log('Connecting to ' + url);
+  document.getElementById('btnConnect').disabled = true;
+
+  // Build protocols/headers — WebSocket API doesn't support custom headers from browser,
+  // so we pass session ID and API key as query params as fallback
+  let wsUrl = url;
+  const params = new URLSearchParams();
+  if (sessionId) params.set('session_id', sessionId);
+  if (apiKey) params.set('api_key', apiKey);
+  const qs = params.toString();
+  if (qs) wsUrl += (wsUrl.includes('?') ? '&' : '?') + qs;
+
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('WS Open', 'connecting');
+    log('WebSocket connected, sending OPEN…', 'log-send');
+    const openMsg = {
+      version: "2",
+      type: "open",
+      seq: 1,
+      id: sessionId,
+      position: "00:00:00.000",
+      parameters: {
+        conversationId: sessionId,
+        participant: { ani: "+15551234567", aniName: "Test User", dnis: "+15559876543" },
+        media: [{ type: "audio", format: "PCMU", rate: 8000, channels: ["external"] }]
+      }
+    };
+    ws.send(JSON.stringify(openMsg));
+    document.getElementById('btnDisconnect').disabled = false;
+  };
+
+  ws.onmessage = (evt) => {
+    if (typeof evt.data === 'string') {
+      try {
+        const msg = JSON.parse(evt.data);
+        log('← ' + msg.type + ': ' + JSON.stringify(msg.parameters || {}).substring(0, 200), 'log-recv');
+        if (msg.type === 'opened') {
+          setStatus('Connected', 'connected');
+          document.getElementById('btnMic').disabled = false;
+          log('Session OPENED — ready for audio', 'log-info');
+        } else if (msg.type === 'closed') {
+          log('Session CLOSED by server', 'log-info');
+          doDisconnect();
+        }
+      } catch (e) {
+        log('← text: ' + evt.data.substring(0, 200), 'log-recv');
+      }
+    } else {
+      // Binary = PCMU audio from bot
+      const pcmuBytes = new Uint8Array(evt.data);
+      log('← audio: ' + pcmuBytes.length + ' bytes PCMU', 'log-audio');
+      playPcmu(pcmuBytes);
+    }
+  };
+
+  ws.onerror = (e) => {
+    log('WebSocket error', 'log-error');
+    setStatus('Error', 'disconnected');
+  };
+
+  ws.onclose = (e) => {
+    log('WebSocket closed (code=' + e.code + ')', 'log-info');
+    setStatus('Disconnected', 'disconnected');
+    document.getElementById('btnConnect').disabled = false;
+    document.getElementById('btnDisconnect').disabled = true;
+    document.getElementById('btnMic').disabled = true;
+    stopMic();
+    ws = null;
+  };
+}
+
+function doDisconnect() {
+  if (ws && ws.readyState <= 1) {
+    serverSeq++;
+    const closeMsg = {
+      version: "2", type: "close", seq: serverSeq,
+      id: document.getElementById('sessionId').value || 'test',
+      position: "00:00:00.000",
+      parameters: { reason: "normal" }
+    };
+    ws.send(JSON.stringify(closeMsg));
+    log('→ CLOSE sent', 'log-send');
+    setTimeout(() => { if (ws) ws.close(); }, 1000);
+  }
+  stopMic();
+}
+
+async function toggleMic() {
+  if (micActive) { stopMic(); return; }
+  try {
+    audioCtx = audioCtx || new AudioContext({ sampleRate: 16000 });
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    const source = audioCtx.createMediaStreamSource(micStream);
+
+    // ScriptProcessor for simplicity (worklet would be better for production)
+    micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+    micProcessor.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== 1) return;
+      const float32 = e.inputBuffer.getChannelData(0);
+
+      // Downsample 16kHz → 8kHz
+      const ds = new Int16Array(float32.length / 2);
+      for (let i = 0; i < ds.length; i++) {
+        const s = float32[i * 2];
+        ds[i] = Math.max(-32768, Math.min(32767, Math.round(s * 32767)));
+      }
+
+      // Encode to mu-law
+      const mulaw = pcm16ToMulaw(ds);
+
+      // Send binary
+      ws.send(mulaw.buffer);
+
+      // Mic meter
+      let rms = 0;
+      for (let i = 0; i < float32.length; i++) rms += float32[i] * float32[i];
+      rms = Math.sqrt(rms / float32.length);
+      document.getElementById('micMeter').style.width = Math.min(100, rms * 500) + '%';
+    };
+
+    source.connect(micProcessor);
+    micProcessor.connect(audioCtx.destination);
+    micActive = true;
+    document.getElementById('btnMic').textContent = 'Stop Mic';
+    log('Microphone started (16kHz → 8kHz PCMU)', 'log-info');
+  } catch (e) {
+    log('Mic error: ' + e.message, 'log-error');
+  }
+}
+
+function stopMic() {
+  if (micProcessor) { micProcessor.disconnect(); micProcessor = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  micActive = false;
+  document.getElementById('btnMic').textContent = 'Start Mic';
+  document.getElementById('micMeter').style.width = '0%';
+}
+
+// Playback: decode PCMU → Float32, queue and play
+function playPcmu(pcmuBytes) {
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 8000 });
+  const float32 = mulawToPcmFloat(pcmuBytes);
+  playbackQueue.push(float32);
+  if (!isPlaying) drainPlayback();
+}
+
+function drainPlayback() {
+  if (playbackQueue.length === 0) { isPlaying = false; return; }
+  isPlaying = true;
+  const samples = playbackQueue.shift();
+  const buf = audioCtx.createBuffer(1, samples.length, 8000);
+  buf.getChannelData(0).set(samples);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  src.onended = () => {
+    // Playback meter
+    let rms = 0;
+    for (let i = 0; i < samples.length; i++) rms += samples[i] * samples[i];
+    rms = Math.sqrt(rms / samples.length);
+    document.getElementById('playMeter').style.width = Math.min(100, rms * 500) + '%';
+    setTimeout(() => document.getElementById('playMeter').style.width = '0%', 200);
+    drainPlayback();
+  };
+  src.start();
+}
+</script>
+</body>
+</html>

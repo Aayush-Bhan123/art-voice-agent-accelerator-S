@@ -288,6 +288,8 @@ class MemoManager:
             a new MemoManager with empty state. Missing core memory or
             chat history fields are handled gracefully.
         """
+        if redis_mgr is None:
+            return cls(session_id=session_id)
         key = cls.build_redis_key(session_id)
         data = redis_mgr.get_session_data(key)
         mm = cls(session_id=session_id)
@@ -320,6 +322,8 @@ class MemoManager:
             await manager.persist()  # Uses stored manager
             ```
         """
+        if redis_mgr is None:
+            return cls(session_id=session_id)
         key = cls.build_redis_key(session_id)
         data = redis_mgr.get_session_data(key)
         mm = cls(session_id=session_id, redis_mgr=redis_mgr)
@@ -362,7 +366,8 @@ class MemoManager:
         """
         mgr = redis_mgr or self._redis_manager
         if not mgr:
-            raise ValueError("No Redis manager available")
+            logger.debug("Redis disabled – skipping persist for session %s", self.session_id)
+            return
         await self.persist_to_redis_async(mgr)
 
     def persist_to_redis(
@@ -397,6 +402,9 @@ class MemoManager:
             Use the async version (persist_to_redis_async) in async contexts
             to avoid blocking the event loop.
         """
+        if redis_mgr is None:
+            logger.debug("Redis disabled – skipping sync persist for session %s", self.session_id)
+            return
         key = self.build_redis_key(self.session_id)
         redis_mgr.store_session_data(key, self.to_redis_dict())
         if ttl_seconds:
@@ -444,6 +452,9 @@ class MemoManager:
             Preferred method for persistence in async contexts such as
             WebSocket handlers and background tasks.
         """
+        if redis_mgr is None:
+            logger.debug("Redis disabled – skipping async persist for session %s", self.session_id)
+            return
         try:
             key = self.build_redis_key(self.session_id)
             await redis_mgr.store_session_data_async(key, self.to_redis_dict())
@@ -1534,6 +1545,8 @@ class MemoManager:
     # --- LIVE DATA REFRESH -------------------------------------------
     async def refresh_from_redis_async(self, redis_mgr: AzureRedisManager) -> bool:
         """Refresh the current session with live data from Redis."""
+        if redis_mgr is None:
+            return False
         key = self.build_redis_key(self.session_id)
         try:
             data = await redis_mgr.get_session_data_async(key)
@@ -1556,6 +1569,8 @@ class MemoManager:
 
     def refresh_from_redis(self, redis_mgr: AzureRedisManager) -> bool:
         """Synchronous version of refresh_from_redis_async."""
+        if redis_mgr is None:
+            return False
         key = self.build_redis_key(self.session_id)
         try:
             data = redis_mgr.get_session_data(key)
@@ -1580,6 +1595,8 @@ class MemoManager:
         self, redis_mgr: AzureRedisManager, key: str, default: Any = None
     ) -> Any:
         """Get a specific context value from live Redis data without fully refreshing the session."""
+        if redis_mgr is None:
+            return default
         try:
             redis_key = self.build_redis_key(self.session_id)
             data = await redis_mgr.get_session_data_async(redis_key)
@@ -1597,6 +1614,9 @@ class MemoManager:
         self, redis_mgr: AzureRedisManager, key: str, value: Any
     ) -> bool:
         """Set a specific context value in both local state and Redis."""
+        if redis_mgr is None:
+            self.context[key] = value
+            return True
         try:
             self.context[key] = value
             await self.persist_to_redis_async(redis_mgr)

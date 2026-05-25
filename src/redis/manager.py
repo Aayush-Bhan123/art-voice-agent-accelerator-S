@@ -293,10 +293,18 @@ class AzureRedisManager:
             self.logger.warning("Redis cluster initialization failed (will try standalone): %s", exc)
             if not self.use_cluster:
                 raise
-            self.logger.debug("Falling back to standalone Redis client.")
-            standalone_kwargs = {**common_kwargs, "db": self.db, **auth_kwargs}
-            self.redis_client = redis.Redis(**standalone_kwargs)
-            self.use_cluster = False
+            # Only fall back to standalone if the env explicitly opted out of cluster;
+            # if use_cluster was set dynamically (e.g. via MovedError), keep it True so
+            # the next retry still attempts cluster mode instead of looping on MovedError.
+            use_cluster_env = os.getenv("REDIS_USE_CLUSTER") or os.getenv("REDIS_CLUSTER_MODE")
+            env_requested_cluster = use_cluster_env and str(use_cluster_env).lower() in {"1", "true", "yes", "on"}
+            if not env_requested_cluster:
+                self.logger.debug("Falling back to standalone Redis client.")
+                standalone_kwargs = {**common_kwargs, "db": self.db, **auth_kwargs}
+                self.redis_client = redis.Redis(**standalone_kwargs)
+                self.use_cluster = False
+            else:
+                raise
         except Exception as exc:
             self.logger.error("Redis client initialization error: %s", exc)
             raise

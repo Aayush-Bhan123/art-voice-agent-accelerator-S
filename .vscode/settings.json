@@ -13,5 +13,6 @@
             "tests/evaluation/scenarios/**/*.yaml",
             "tests/evaluation/scenarios/**/*.yml"
         ]
-    }
+    },
+    "makefile.configureOnOpen": false
 }

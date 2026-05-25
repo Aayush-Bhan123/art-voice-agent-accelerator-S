@@ -9,7 +9,7 @@ RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
+ENV BRIDGE_MODE=pcmu_pcm16
 # Create a non-root user and group
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
@@ -19,7 +19,7 @@ WORKDIR /app
 # Install build dependencies (gcc needed for some Azure SDK native extensions)
 # Note: portaudio19-dev NOT installed - pyaudio/sounddevice are optional [audio] extras for local dev only
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc build-essential && \
+    apt-get install -y --no-install-recommends gcc build-essential ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Set up virtual environment

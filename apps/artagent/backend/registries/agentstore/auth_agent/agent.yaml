@@ -61,7 +61,7 @@ session:
     type: azure_semantic_vad
     threshold: 0.5
     prefix_padding_ms: 240
-    silence_duration_ms: 700
+    silence_duration_ms: 1000
 
   tool_choice: auto
 

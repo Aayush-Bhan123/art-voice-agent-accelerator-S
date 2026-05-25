@@ -28,7 +28,7 @@ load_dotenv()
 
 
 class StreamingConversationTranscriberFromBytes:
-    _DEFAULT_LANGS: Final[list[str]] = ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"]
+    _DEFAULT_LANGS: Final[list[str]] = ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"]
 
     def __init__(
         self,

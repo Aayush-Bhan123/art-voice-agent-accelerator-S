@@ -94,7 +94,7 @@ class StreamingSpeechRecognizerFromBytes:
         recognizer = StreamingSpeechRecognizerFromBytes(
             key="your-speech-key",  # or None for Default Credentials
             region="eastus",
-            candidate_languages=["en-US", "es-ES", "fr-FR"],
+            candidate_languages=["en-US", "es-ES", "fr-CA"],
             vad_silence_timeout_ms=1000,
             audio_format="pcm",
             enable_neural_fe=True,
@@ -138,7 +138,7 @@ class StreamingSpeechRecognizerFromBytes:
     _DEFAULT_LANGS: Final[list[str]] = [
         "en-US",
         "es-ES",
-        "fr-FR",
+        "fr-CA",
         "de-DE",
         "it-IT",
         "ko-KR",
@@ -180,7 +180,7 @@ class StreamingSpeechRecognizerFromBytes:
 
         Behavior Configuration:
             candidate_languages (Optional[List[str]]): Languages for automatic
-                detection. Defaults to ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"].
+                detection. Defaults to ["en-US", "es-ES", "fr-CA", "de-DE", "it-IT"].
                 More languages may impact recognition latency.
             vad_silence_timeout_ms (int): Voice activity detection silence timeout
                 in milliseconds before finalizing recognition. Default: 800ms.
