@@ -84,7 +84,7 @@ from apps.artagent.backend.voice.shared.config_resolver import resolve_orchestra
 
 # Pool management
 from src.pools.session_manager import SessionContext
-from src.audio_bridge import FfmpegAudioBridge, AudioopAudioBridge, start_bridge_periodic_analytics
+from src.audio_bridge import FfmpegAudioBridge, AudioopAudioBridge
 from src.stateful.state_managment import MemoManager
 from src.speech.speech_recognizer import StreamingSpeechRecognizerFromBytes
 from src.enums.stream_modes import StreamMode
@@ -109,7 +109,7 @@ SILENCE_GAP_MS: int = 500
 # Browser transport constants
 BROWSER_PCM_SAMPLE_RATE: int = 24000
 BROWSER_SPEECH_RMS_THRESHOLD: int = 200
-BROWSER_SILENCE_GAP_SECONDS: float = 0.8
+BROWSER_SILENCE_GAP_SECONDS: float = 0.5
 # Session inactivity timeout - loaded from settings (set to 0 or negative to disable)
 try:
     from apps.artagent.backend.config.settings import (
@@ -370,15 +370,19 @@ class VoiceHandler:
             orchestration_tasks=orchestration_tasks,
             event_loop=event_loop,
         )
-        context.bridge_mode = BRIDGE_MODE_DEFAULT
+
+        # Browser/web sessions already deliver PCM16, so the PCMU<->PCM16 bridge
+        # is never needed there. For all other transports (e.g. ACS telephony),
+        # honor the configured BRIDGE_MODE.
+        if config.transport == "browser":
+            context.bridge_mode = "off"
+        else:
+            context.bridge_mode = BRIDGE_MODE_DEFAULT
 
         if context.bridge_mode == "pcmu_pcm16":
             try:
                 # context.audio_bridge = FfmpegAudioBridge(buffer_limit_ms=BRIDGE_BUFFER_LIMIT_MS)
                 context.audio_bridge = AudioopAudioBridge(buffer_limit_ms=BRIDGE_BUFFER_LIMIT_MS)
-                context._bridge_analytics_task = await start_bridge_periodic_analytics(
-                    context.audio_bridge, session_key, interval_s=30.0,
-                )
             except Exception as exc:
                 logger.error("[%s] Failed to initialize audio bridge: %s", session_key[-8:], exc)
                 if BRIDGE_FAIL_CLOSED:
@@ -640,35 +644,10 @@ class VoiceHandler:
             return b""
 
     def _close_audio_bridge(self) -> None:
-        # Cancel periodic analytics reporter
-        analytics_task = getattr(self._context, "_bridge_analytics_task", None)
-        if analytics_task is not None:
-            analytics_task.cancel()
-            self._context._bridge_analytics_task = None
-
         bridge = self._context.audio_bridge
         self._context.audio_bridge = None
         if bridge is None:
             return
-        try:
-            stats = bridge.get_stats()
-            logger.info(
-                "FFmpeg bridge session summary | session=%s "
-                "uptime_s=%.1f "
-                "ingress_count=%d ingress_avg_ms=%.2f ingress_rtf_avg=%.4f ingress_rtf_max=%.4f "
-                "egress_count=%d egress_avg_ms=%.2f egress_rtf_avg=%.4f egress_rtf_max=%.4f "
-                "frames_in=%d frames_out=%d dropped=%d buffer_depth_ms=%.1f",
-                self._session_short,
-                stats.bridge_uptime_s,
-                stats.ingress_transcode_count, stats.ingress_transcode_avg_ms,
-                stats.ingress_rtf_avg, stats.ingress_rtf_max,
-                stats.egress_transcode_count, stats.egress_transcode_avg_ms,
-                stats.egress_rtf_avg, stats.egress_rtf_max,
-                stats.frames_in, stats.frames_out,
-                stats.dropped_frames, stats.buffer_depth_ms,
-            )
-        except Exception:
-            logger.debug("[%s] Failed to collect bridge stats", self._session_short, exc_info=True)
         try:
             bridge.close()
         except Exception as exc:
@@ -789,15 +768,12 @@ class VoiceHandler:
 
     async def _handle_browser_audio(self, audio_bytes: bytes) -> None:
         """Process raw PCM audio from browser WebSocket."""
-        # Check for barge-in (RMS-based): only interrupt when TTS is actively playing.
-        # Note: _browser_barge_in is intentionally unused — BrowserBargeInController has
-        # no on_speech_detected() method and the field was never initialised. We trigger
-        # barge-in directly through _barge_in_controller instead.
+        # Check for barge-in (RMS-based)
         rms = pcm16le_rms(audio_bytes)
         if rms > BROWSER_SPEECH_RMS_THRESHOLD:
             self._touch_activity()
-            if self._tts and self._tts.is_playing and self._barge_in_controller:
-                await self._barge_in_controller.handle_barge_in()
+            if self._browser_barge_in:
+                await self._browser_barge_in.on_speech_detected()
         self.write_audio(audio_bytes)
 
     async def _handle_browser_message(self, text: str) -> None:
