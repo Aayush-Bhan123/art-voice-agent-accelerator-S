@@ -35,7 +35,7 @@ handoff:
 # Voice Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 voice:
-  name: en-US-Ava:DragonHDLatestNeural
+  name: en-US-AndrewMultilingualNeural
   type: azure-standard
   rate: "0%"
 

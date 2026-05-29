@@ -12,7 +12,7 @@ name: AuthAgent
 description: Handles MFA, identity verification, and security questions
 
 greeting: |
-  {% if institution_name %}Hello, thank you for calling {{ institution_name }}. How can I help you today?
+  {% if institution_name %}'Bienvenue chez iA Assurance habitation et auto! C'est Andrew. Comment est-ce que je peux vous aider aujourd'hui?'
   {% else %}Hello, thank you for calling. How can I help you today?
   {% endif %}
 return_greeting: "Welcome back. Let me verify a few details and we'll continue."
@@ -28,7 +28,7 @@ handoff:
 # Voice Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 voice:
-  name: en-US-Ava:DragonHDLatestNeural
+  name: en-US-AndrewMultilingualNeural
   type: azure-standard
   rate: "0%"
 

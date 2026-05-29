@@ -29,7 +29,7 @@ handoff:
 # Voice Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 voice:
-  name: en-US-AvaMultilingualNeural
+  name: en-US-AndrewMultilingualNeural
   type: azure-standard
   rate: "-4%"
 

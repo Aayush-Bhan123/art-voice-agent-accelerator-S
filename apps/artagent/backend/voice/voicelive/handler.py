@@ -1689,6 +1689,14 @@ class VoiceLiveSDKHandler:
             logger.debug("🎤 User paused speaking")
             logger.debug("🤖 Generating assistant reply")
             self._mark_audio_playback(False)
+            # Release barge-in cancel-latch so the assistant's NEW response audio
+            # is not dropped. The latch was raised on SPEECH_STARTED to suppress
+            # straggler deltas from the previous (cancelled) response; once the
+            # user has stopped speaking the model emits a fresh response and we
+            # must let its audio through. Without this reset, every delta of the
+            # new response is dropped in _send_audio_delta() and the caller
+            # hears nothing (bridge frames_out=0).
+            self._cancel_in_progress = False
 
         elif etype == ServerEventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_DELTA:
             transcript_text = getattr(event, "transcript", "") or getattr(event, "delta", "")
