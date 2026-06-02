@@ -14,7 +14,9 @@ import asyncio
 import base64
 import json
 import os
+import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 from fastapi.responses import HTMLResponse
@@ -48,6 +50,31 @@ GENESYS_WS_API_KEY = os.environ.get("GENESYS_WS_API_KEY", "").strip()
 # Timeout for receiving a message from Genesys before considering the connection dead (seconds).
 # Genesys sends audio at ~50fps (20ms) plus PINGs, so 30s of silence is abnormal.
 _RECEIVE_TIMEOUT_S = float(os.environ.get("GENESYS_RECEIVE_TIMEOUT", "30"))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AUDIOHOOK-0012 (server message rate limiting) – instrumentation thresholds
+# ──────────────────────────────────────────────────────────────────────────────
+# Genesys closes the WebSocket and raises AUDIOHOOK-0012 when the server sends
+# too many messages in a short window. Published limits per AudioHook session:
+#
+#   ┌──────────────────────┬──────────────┬─────────────┐
+#   │ Message type         │ Sustained /s │ Burst /s    │
+#   ├──────────────────────┼──────────────┼─────────────┤
+#   │ Text messages        │      5       │     25      │
+#   │ Binary messages      │      5       │     25      │  (when applicable)
+#   │ Pause messages       │      2       │      4      │
+#   │ Resume messages      │      2       │      4      │
+#   └──────────────────────┴──────────────┴─────────────┘
+#
+# We log a WARNING when our outbound rate within a rolling 1-second window
+# approaches the sustained limit, so the breach is visible in App Insights
+# *before* Genesys terminates the call.
+# Ref: https://developer.genesys.cloud/platform/operational-event-catalog/audiohook/audiohook-0012
+_AUDIOHOOK_RATE_WINDOW_S = 1.0
+_AUDIOHOOK_TEXT_WARN_PER_S = 4   # warn when ≥ 4 text frames/s (limit is 5)
+_AUDIOHOOK_TEXT_BURST_WARN = 20  # warn when ≥ 20 text frames in window (burst limit 25)
+_AUDIOHOOK_BIN_WARN_PER_S = 60   # binary audio normally ~50 fps; >60 indicates a burst
+_AUDIOHOOK_PING_WARN_PER_S = 3   # Genesys normally PINGs every ~5-10s; >3/s = storm
 
 # Possible locations for tests/genesys_test.html (genesys.py is in .../api/v1/endpoints/)
 _THIS_DIR = Path(__file__).resolve().parent
@@ -105,6 +132,17 @@ class _GenesysWebSocketWrapper:
         self._real = real_ws
         self._write_lock = write_lock
         self._send_count = 0
+        # AUDIOHOOK-0012 instrumentation: rolling 1s window of binary frames
+        # sent to Genesys, paired with each frame's byte size. Used to detect
+        # bursts that may trip the binary message rate limit (5/s sustained,
+        # 25/s burst, Genesys 429 → AUDIOHOOK-0012).
+        # Stored as (monotonic_timestamp, byte_size) tuples.
+        self._binary_send_window: "deque[tuple[float, int]]" = deque()
+        self._binary_rate_warn_logged_at: float = 0.0
+        # Throttles the per-second INFO summary (frames/s, bytes/s, chunk
+        # min/avg/max) so the log shows one rollup per second of active audio
+        # rather than one line per frame.
+        self._binary_summary_logged_at: float = 0.0
 
     @property
     def state(self):
@@ -141,6 +179,54 @@ class _GenesysWebSocketWrapper:
                         return
                     async with self._write_lock:
                         await self._real.send_bytes(pcmu_bytes)
+                    # ── AUDIOHOOK-0012 binary-frame instrumentation ──────
+                    # Mirror of the text-frame tracker in _control_task. We
+                    # need byte-level visibility here because the rate limit
+                    # we are tripping is on outbound binary frames (Genesys
+                    # 429 "Rate limit exceeded"). Every frame is tracked in a
+                    # rolling 1s window so we can report:
+                    #   - frame rate (frames/s)
+                    #   - throughput (bytes/s) ≈ realtime if pacing is OK
+                    #     (PCMU 8kHz µ-law ⇒ 8000 bytes/s == 1.0x realtime)
+                    #   - chunk size distribution (min/avg/max bytes)
+                    # Limit refresher:
+                    #   binary messages → 5/s sustained, 25/s burst
+                    now = time.monotonic()
+                    frame_bytes = len(pcmu_bytes)
+                    self._binary_send_window.append((now, frame_bytes))
+                    cutoff = now - _AUDIOHOOK_RATE_WINDOW_S
+                    while self._binary_send_window and self._binary_send_window[0][0] < cutoff:
+                        self._binary_send_window.popleft()
+                    rate = len(self._binary_send_window)
+                    total_bytes = sum(sz for _, sz in self._binary_send_window)
+                    sizes = [sz for _, sz in self._binary_send_window]
+                    min_sz = min(sizes)
+                    max_sz = max(sizes)
+                    avg_sz = total_bytes // rate
+                    realtime_x = total_bytes / 8000.0  # 8000 B/s == 1.0x realtime for PCMU 8kHz
+
+                    # Per-second INFO summary while audio is active.
+                    if (now - self._binary_summary_logged_at) >= 1.0:
+                        self._binary_summary_logged_at = now
+                        logger.info(
+                            "[GenesysWrapper] AUDIOHOOK-0012 binary egress 1s: "
+                            "frames=%d bytes=%d (%.2fx realtime) chunk min/avg/max=%d/%d/%d "
+                            "total_frames_sent=%d",
+                            rate, total_bytes, realtime_x,
+                            min_sz, avg_sz, max_sz, self._send_count,
+                        )
+
+                    # WARNING when we approach/exceed the published Genesys
+                    # binary rate limits. Throttled to one warning per second.
+                    if rate >= _AUDIOHOOK_BIN_WARN_PER_S and (now - self._binary_rate_warn_logged_at) >= 1.0:
+                        self._binary_rate_warn_logged_at = now
+                        logger.warning(
+                            "[GenesysWrapper] AUDIOHOOK-0012 watch: outbound binary frame burst "
+                            "%d/s bytes=%d (%.2fx realtime) chunk min/avg/max=%d/%d/%d "
+                            "(threshold=%d, hard limit=25 burst / 5 sustained)",
+                            rate, total_bytes, realtime_x,
+                            min_sz, avg_sz, max_sz, _AUDIOHOOK_BIN_WARN_PER_S,
+                        )
                 except Exception as e:
                     logger.warning("Genesys send_bytes failed: %r (%s)", e, type(e).__name__)
             return
@@ -364,6 +450,11 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                             return
 
                         if raw.get("type") == "websocket.disconnect":
+                            logger.info(
+                                "[%s] Genesys peer closed WebSocket (websocket.disconnect code=%s)",
+                                seq_state["session_id"],
+                                raw.get("code"),
+                            )
                             shutdown_event.set()
                             return
                         if raw.get("type") != "websocket.receive":
@@ -391,12 +482,47 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.debug("[%s] Reader task error", seq_state["session_id"], exc_info=True)
+                    logger.warning(
+                        "[%s] Reader task error — closing Genesys connection",
+                        seq_state["session_id"],
+                        exc_info=True,
+                    )
                 finally:
                     shutdown_event.set()
 
             async def _control_task() -> None:
                 """Process control messages (PING, UPDATE, CLOSE) with immediate responses."""
+                # AUDIOHOOK-0012 instrumentation: rolling 1s windows for
+                #   - outbound text frames (PONG/UPDATED/CLOSED) → text rate limit
+                #     (5/s sustained, 25/s burst).
+                #   - inbound PINGs → a PING storm forces a matching PONG burst,
+                #     which is the most likely path to trip the text rate limit.
+                # See https://developer.genesys.cloud/platform/operational-event-catalog/audiohook/audiohook-0012
+                text_send_times: "deque[float]" = deque()
+                ping_recv_times: "deque[float]" = deque()
+                text_warn_logged_at: float = 0.0
+                ping_warn_logged_at: float = 0.0
+
+                def _record_text_send(sid: str, kind: str) -> None:
+                    """AUDIOHOOK-0012: log a warning if outbound text rate gets close to the limit."""
+                    nonlocal text_warn_logged_at
+                    now = time.monotonic()
+                    text_send_times.append(now)
+                    cutoff = now - _AUDIOHOOK_RATE_WINDOW_S
+                    while text_send_times and text_send_times[0] < cutoff:
+                        text_send_times.popleft()
+                    rate = len(text_send_times)
+                    if (
+                        (rate >= _AUDIOHOOK_TEXT_WARN_PER_S or rate >= _AUDIOHOOK_TEXT_BURST_WARN)
+                        and (now - text_warn_logged_at) >= 1.0
+                    ):
+                        text_warn_logged_at = now
+                        logger.warning(
+                            "[%s] AUDIOHOOK-0012 watch: outbound text frame rate %d/s "
+                            "(last=%s, sustained_limit=5, burst_limit=25)",
+                            sid, rate, kind,
+                        )
+
                 try:
                     while not shutdown_event.is_set():
                         try:
@@ -411,13 +537,50 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
 
                         sid = seq_state["session_id"]
 
+                        # AUDIOHOOK-0012: capture Genesys 'error' messages at WARNING
+                        # so the message that arrives *just before* a forced close is
+                        # visible in App Insights. This is the single most important
+                        # diagnostic for AUDIOHOOK-0012 — it identifies which message
+                        # class and rate tripped the limit.
+                        if msg_type == "error":
+                            try:
+                                raw_err = json.dumps(msg)[:2000]
+                            except (TypeError, ValueError):
+                                raw_err = repr(msg)[:2000]
+                            logger.warning(
+                                "[%s] Genesys ERROR frame received (possible AUDIOHOOK-0012): %s",
+                                sid, raw_err,
+                            )
+                            continue
+
                         if msg_type == GENESYS_PING:
+                            # AUDIOHOOK-0012: track inbound PING rate. A PING storm
+                            # forces a 1:1 PONG burst on our side, which is the most
+                            # plausible way to breach the text-message rate limit.
+                            now = time.monotonic()
+                            ping_recv_times.append(now)
+                            cutoff = now - _AUDIOHOOK_RATE_WINDOW_S
+                            while ping_recv_times and ping_recv_times[0] < cutoff:
+                                ping_recv_times.popleft()
+                            ping_rate = len(ping_recv_times)
+                            if (
+                                ping_rate >= _AUDIOHOOK_PING_WARN_PER_S
+                                and (now - ping_warn_logged_at) >= 1.0
+                            ):
+                                ping_warn_logged_at = now
+                                logger.warning(
+                                    "[%s] AUDIOHOOK-0012 watch: inbound Genesys PING rate %d/s "
+                                    "— each PING triggers a PONG, risking text rate limit (5/s)",
+                                    sid, ping_rate,
+                                )
+
                             seq_state["server"] += 1
                             pong = _genesys_server_message(
                                 GENESYS_PONG, sid, seq_state["server"], seq_state["client"]
                             )
                             async with ws_write_lock:
                                 await websocket.send_json(pong)
+                            _record_text_send(sid, "pong")
                             continue
 
                         if msg_type == GENESYS_UPDATE:
@@ -427,27 +590,41 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                             )
                             async with ws_write_lock:
                                 await websocket.send_json(updated)
+                            _record_text_send(sid, "updated")
                             continue
 
                         if msg_type == GENESYS_CLOSE:
+                            logger.info(
+                                "[%s] Genesys CLOSE received (reason=%r) — sending CLOSED",
+                                sid,
+                                (msg.get("parameters") or {}).get("reason"),
+                            )
                             seq_state["server"] += 1
                             closed = _genesys_server_message(
                                 GENESYS_CLOSED, sid, seq_state["server"], seq_state["client"]
                             )
                             async with ws_write_lock:
                                 await websocket.send_json(closed)
+                            _record_text_send(sid, "closed")
                             shutdown_event.set()
                             return
 
                         if msg_type in ("playback_started", "playback_completed", "playback_stopped"):
                             continue
 
-                        logger.debug("[%s] Genesys control message type=%s", sid, msg_type)
+                        # AUDIOHOOK-0012: log any unknown control message at INFO
+                        # (was debug) so future protocol surprises are not silent.
+                        logger.info(
+                            "[%s] Genesys control message type=%s payload=%s",
+                            sid, msg_type, json.dumps(msg)[:500],
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.debug(
-                        "[%s] Control task error", seq_state["session_id"], exc_info=True
+                    logger.warning(
+                        "[%s] Control task error — closing Genesys connection",
+                        seq_state["session_id"],
+                        exc_info=True,
                     )
                 finally:
                     shutdown_event.set()
@@ -479,8 +656,10 @@ async def genesys_audiohook_stream(websocket: WebSocket) -> None:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.debug(
-                        "[%s] Audio task error", seq_state["session_id"], exc_info=True
+                    logger.warning(
+                        "[%s] Audio task error — closing Genesys connection",
+                        seq_state["session_id"],
+                        exc_info=True,
                     )
                 finally:
                     shutdown_event.set()

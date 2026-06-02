@@ -61,9 +61,9 @@ session:
 
   turn_detection:
     type: azure_semantic_vad
-    threshold: 0.5
-    prefix_padding_ms: 240
-    silence_duration_ms: 1000
+    threshold: 0.3 # 0.5 -> 0.3  (more sensitive to caller starting to talk)
+    prefix_padding_ms: 300
+    silence_duration_ms: 1200 # keep high for don't-cut-off behavior
 
   tool_choice: auto
 
@@ -78,9 +78,9 @@ speech:
     voice_name: en-US-AlloyTurboMultilingualNeural
 
   vad:
-    threshold: 0.02
-    silence_duration_ms: 900
-    prefix_padding_ms: 200
+    threshold: 0.015  # 0.02 -> 0.015  (detect caller speech onset faster)
+    silence_duration_ms: 1400
+    prefix_padding_ms: 300
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tools (referenced by name from shared registry)
